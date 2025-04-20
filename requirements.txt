@@ -1,0 +1,8 @@
+streamlit
+psycopg2-binary
+pandas
+pyvis
+networkx
+requests
+confluent_kafka
+streamlit-autorefresh
