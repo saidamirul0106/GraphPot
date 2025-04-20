@@ -18,7 +18,7 @@ DB_HOST = "db.ypsdflhceqxrjwyxvclr.supabase.co"
 DB_NAME = "postgres" # hornet7_db is for localhost
 DB_USER = "postgres"
 DB_PASS = "Serigala76!"  # Change this
-DB_PORT = "5432"
+DB_PORT = 5432
 
 # Kafka config
 KAFKA_BROKER = "10.0.2.15:9092"
@@ -57,7 +57,8 @@ def get_connection():
         dbname=DB_NAME,
         user=DB_USER,
         password=DB_PASS,
-        cursor_factory=RealDictCursor
+        cursor_factory=RealDictCursor,
+        sslmode='require'
     )
 
 # Load PostgreSQL data
