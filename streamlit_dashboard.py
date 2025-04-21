@@ -171,6 +171,30 @@ def build_attack_graph(row):
 
     return G
 
+#Detect attack types
+def detect_attack_type(eventid, input_command, message):
+    if eventid == 'cowrie.login.failed':
+        return 'Brute Force Attack'
+    elif eventid == 'cowrie.login.success':
+        return 'Successful Login'
+    elif eventid == 'cowrie.command.input':
+        if input_command:
+            cmd = input_command.lower()
+            if 'wget' in cmd or 'curl' in cmd:
+                return 'Malware Download Attempt'
+            elif 'rm -rf' in cmd:
+                return 'Destructive Attack (Wiper)'
+            elif 'busybox' in cmd or '/etc/passwd' in cmd:
+                return 'Reconnaissance / Enumeration'
+            else:
+                return 'Command Injection Attempt'
+        else:
+            return 'Command Injection Attempt'
+    elif eventid == 'cowrie.session.connect':
+        return 'Port Scanning / Connection Attempt'
+    else:
+        return 'Unknown Activity'
+
 # Streamlit Dashboard
 st.set_page_config(page_title="GraphPot - Network Session Analysis", layout="wide")
 st.title("🛡️ GraphPot - Network Session Analysis")
@@ -184,6 +208,30 @@ st.markdown("---")
 df = load_data()
 
 if not df.empty:
+
+    # Detect attack types
+    df['attack_type'] = df.apply(lambda row: detect_attack_type(
+        row.get('eventid', ''), 
+        row.get('input', ''), 
+        row.get('message', '')
+    ), axis=1)
+
+    # --- Attack Summary Cards ---
+    st.subheader("📊 Attack Summary")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("🔒 Brute Force", (df['attack_type'] == "Brute Force Attack").sum())
+    with col2:
+        st.metric("🐍 Malware Download", (df['attack_type'] == "Malware Download Attempt").sum())
+    with col3:
+        st.metric("🔥 Wiper Attack", (df['attack_type'] == "Destructive Attack (Wiper)").sum())
+    with col4:
+        st.metric("🕵️ Reconnaissance", (df['attack_type'] == "Reconnaissance / Enumeration").sum())
+
+    st.markdown("---")
+
     st.subheader("📋 Latest Captured Sessions")
     st.dataframe(df, use_container_width=True)
 
@@ -259,7 +307,21 @@ if not df.empty:
             components.html(open(path, 'r', encoding='utf-8').read(), height=650)
             os.unlink(path)
 
-        st.info(f"📄 **Session Overview:** {description}")
+        # Color the Session Overview based on attack
+        attack = detect_attack_type(selected_row.get('eventid', ''), selected_row.get('input', ''), selected_row.get('message', ''))
+
+        session_info = f"📄 **Session Overview:** {description} \n\n🛡️ Detected Attack Type: `{attack}`"
+
+        if attack == "Destructive Attack (Wiper)":
+            st.error(session_info)
+        elif attack == "Malware Download Attempt":
+            st.warning(session_info)
+        elif attack == "Brute Force Attack":
+            st.info(session_info)
+        elif attack == "Reconnaissance / Enumeration":
+            st.info(session_info)
+        else:
+            st.success(session_info)
 
 else:
     st.warning("⚠️ No data found.")
