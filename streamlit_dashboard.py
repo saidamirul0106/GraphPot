@@ -232,7 +232,7 @@ if not df.empty:
 
     st.markdown("---")
     
-     def highlight_rows(row):
+    def highlight_rows(row):
         if row['attack_type'] == 'Destructive Attack (Wiper)':
             return ['background-color: #FFB6B6'] * len(row)
         elif row['attack_type'] == 'Malware Download Attempt':
