@@ -1,4 +1,4 @@
-import streamlit as st
+import stramlit as st
 import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -14,10 +14,10 @@ import tempfile
 import os
 
 # PostgreSQL config
-DB_HOST = "db.ypsdflhceqxrjwyxvclr.supabase.co"
+DB_HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
 DB_NAME = "postgres" # hornet7_db is for localhost
-DB_USER = "postgres"
-DB_PASS = "Serigala76!"  # Change this
+DB_USER = "postgres.ypsdflhceqxrjwyxvclr"
+DB_PASS = "Serigala76!"
 DB_PORT = 5432
 
 # Kafka config
@@ -57,6 +57,7 @@ def get_connection():
         dbname=DB_NAME,
         user=DB_USER,
         password=DB_PASS,
+        port=DB_PORT,
         cursor_factory=RealDictCursor,
         sslmode='require'
     )
