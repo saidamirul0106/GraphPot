@@ -251,9 +251,10 @@ if not df.empty:
 
     if attack_filter != "All":
         df = df[df['attack_type'] == attack_filter]
-        st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True)
-    else:
+    if len(df) > 100:
         st.dataframe(df, use_container_width=True)
+    else:
+        st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True)
 
     st.markdown("---")
 
