@@ -231,6 +231,20 @@ if not df.empty:
         st.metric("🕵️ Reconnaissance", (df['attack_type'] == "Reconnaissance / Enumeration").sum())
 
     st.markdown("---")
+    
+    # Define this early (before using it)
+    def highlight_rows(row):
+    if row['attack_type'] == 'Destructive Attack (Wiper)':
+        return ['background-color: #FFB6B6'] * len(row)
+    elif row['attack_type'] == 'Malware Download Attempt':
+        return ['background-color: #FFF3CD'] * len(row)
+    elif row['attack_type'] == 'Brute Force Attack':
+        return ['background-color: #D1ECF1'] * len(row)
+    elif row['attack_type'] == 'Reconnaissance / Enumeration':
+        return ['background-color: #E2E3E5'] * len(row)
+    else:
+        return [''] * len(row)
+
 
     st.subheader("📋 Latest Captured Sessions")
     # ---- Filter by Attack Type ----
