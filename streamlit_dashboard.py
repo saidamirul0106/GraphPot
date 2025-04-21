@@ -237,22 +237,10 @@ if not df.empty:
     attack_filter = st.selectbox("🔍 Filter by Attack Type:", options=["All"] + df['attack_type'].unique().tolist())
 
     if attack_filter != "All":
-         df = df[df['attack_type'] == attack_filter]
-
-    def highlight_rows(row):
-        if row['attack_type'] == 'Destructive Attack (Wiper)':
-            return ['background-color: #FFB6B6'] * len(row)
-        elif row['attack_type'] == 'Malware Download Attempt':
-            return ['background-color: #FFF3CD'] * len(row)
-        elif row['attack_type'] == 'Brute Force Attack':
-            return ['background-color: #D1ECF1'] * len(row)
-        elif row['attack_type'] == 'Reconnaissance / Enumeration':
-            return ['background-color: #E2E3E5'] * len(row)
-        else:
-            return [''] * len(row)
-
-    st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True)
-
+        df = df[df['attack_type'] == attack_filter]
+        st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True)
+    else:
+        st.dataframe(df, use_container_width=True)
 
     st.markdown("---")
 
