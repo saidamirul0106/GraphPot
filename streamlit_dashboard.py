@@ -95,24 +95,29 @@ def load_data():
         rows = cur.fetchall()
     return pd.DataFrame(rows)
 
-# Insert row with automatic attack type detection
 def insert_row(data):
     conn = get_connection()
+    # Auto-fix empty strings to None
+    for key, value in data.items():
+        if value == '':
+            data[key] = None
 
-    # Auto-assign attack_type if not manually filled
-    if 'attack_type' not in data or not data['attack_type']:
-        eventid = data.get('eventid', '')
-        input_cmd = data.get('input', '')
-        message = data.get('message', '')
-        data['attack_type'] = detect_attack_type(eventid, input_cmd, message)
+    # Remove 'id' and 'created_at' if present (let DB handle it)
+    data.pop('id', None)
+    data.pop('created_at', None)
 
-    with conn.cursor() as cur:
-        placeholders = ', '.join(['%s'] * len(data))
-        columns = ', '.join(data.keys())
-        sql = f"INSERT INTO hornet7_data ({columns}) VALUES ({placeholders})"
-        cur.execute(sql, list(data.values()))
-        conn.commit()
+    columns = ', '.join(data.keys())
+    values_placeholder = ', '.join(['%s'] * len(data))
+    sql = f"""INSERT INTO hornet7_data ({columns}) 
+              VALUES ({values_placeholder})"""
+    
+    cur = conn.cursor()
+    print("Inserting data:", data)  # Debugging: you can remove this later
+    cur.execute(sql, list(data.values()))
+    conn.commit()
+    cur.close()
 
+    # Fix: Use correct function name
     send_telegram_alert(data, source="Manual")
 
 
@@ -120,12 +125,22 @@ def insert_row(data):
 def update_row(row_id, data):
     conn = get_connection()
 
+    # Skip 'id' field
+    if 'id' in data:
+        data.pop('id')
+
+    # Remove any empty strings (especially for timestamps)
+    data = {k: v for k, v in data.items() if v not in [None, ""]}
+
     # Auto-reassign attack_type if eventid, input, or message changed
     if any(k in data for k in ['eventid', 'input', 'message']):
         eventid = data.get('eventid', '')
         input_cmd = data.get('input', '')
         message = data.get('message', '')
         data['attack_type'] = detect_attack_type(eventid, input_cmd, message)
+
+    if not data:
+        return  # No update needed if everything is empty
 
     set_clause = ', '.join([f"{col} = %s" for col in data.keys()])
     values = list(data.values())
@@ -137,9 +152,25 @@ def update_row(row_id, data):
         cur.execute(sql, values)
         conn.commit()
 
-# Delete row by session
+    # Send Telegram Alert
+    send_telegram_alert({
+        "src_ip": data.get("src_ip", "N/A"),
+        "eventid": data.get("eventid", "N/A"),
+        "message": f"Session ID {row_id} has been updated.",
+        "timestamp": data.get("timestamp", "N/A")
+    }, source="Update")
+
 def delete_row(session_id):
     conn = get_connection()
+
+    # Before delete, send alert first
+    send_telegram_alert({
+        "src_ip": "N/A",
+        "eventid": "Session Deleted",
+        "message": f"Session {session_id} has been deleted.",
+        "timestamp": pd.Timestamp.now().isoformat()
+    }, source="Delete")
+
     with conn.cursor() as cur:
         cur.execute("DELETE FROM hornet7_data WHERE session = %s", (session_id,))
         conn.commit()
@@ -242,8 +273,10 @@ def save_attack_graph(session_id, G, description):
 st.set_page_config(page_title="GraphPot - Network Session Analysis", layout="wide")
 st.title("🛡️ GraphPot - Network Session Analysis")
 
-# Auto-refresh
-st_autorefresh(interval=20 * 1000, key="refresh")
+# Refresh button
+if st.button("🔄 Refresh"):
+    st.rerun()
+
 
 st.markdown("---")
 
@@ -306,25 +339,25 @@ if not df.empty:
     with st.expander("➕ Insert New Row"):
         new_data = {}
         for col in df.columns:
-            if col != "attack_type":  # <-- Skip asking for attack_type
+            if col not in ["attack_type", "id", "created_at"]:  # <-- Skip id and created_at
                 new_data[col] = st.text_input(f"{col}", key=f"insert_{col}")
         if st.button("Insert"):
             insert_row(new_data)
             st.success("Inserted! Refreshing...")
             st.rerun()
 
-
     with st.expander("✏️ Update Sessions"):
         row_id_to_update = st.text_input("Row ID to update")
         if row_id_to_update:
             updated_data = {}
             for col in df.columns:
-                if col != "attack_type":  # Skip editing attack_type manually
+                if col not in ["attack_type", "id", "created_at"]:  # Skip editing attack_type, id, created_at
                     updated_data[col] = st.text_input(f"{col} (new value)", key=f"update_{col}")
-            if st.button("Update"):
-                update_row(row_id_to_update, updated_data)
-                st.success("Updated! Refreshing...")
-                st.rerun()
+        if st.button("Update"):
+            update_row(row_id_to_update, updated_data)
+            st.success("Updated! Refreshing...")
+            st.rerun()
+
 
 
     with st.expander("❌ Delete by Session ID"):
