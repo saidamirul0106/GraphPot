@@ -63,6 +63,29 @@ def get_connection():
         cursor_factory=RealDictCursor,
         sslmode='require'
     )
+# Detect Attack Type automatically
+def detect_attack_type(eventid, input_cmd, message):
+    input_cmd = (input_cmd or "").lower()
+    message = (message or "").lower()
+
+    if eventid == "cowrie.login.failed":
+        return "Brute Force Attack"
+    elif eventid == "cowrie.login.success":
+        return "Successful Login"
+    elif eventid == "cowrie.command.input":
+        if any(keyword in input_cmd for keyword in ["wget", "curl", ".sh", ".bin"]):
+            return "Malware Download Attempt"
+        elif any(keyword in input_cmd for keyword in ["rm -rf", "dd if=", ":(){ :|:& };:"]):
+            return "Destructive Attack (Wiper)"
+        elif any(keyword in input_cmd for keyword in ["cat /etc/passwd", "uname -a", "whoami", "busybox"]):
+            return "Reconnaissance / Enumeration"
+        else:
+            return "Command Injection Attempt"
+    elif eventid == "cowrie.session.connect":
+        return "Port Scanning / Connection Attempt"
+    else:
+        return "Unknown Activity"
+
 
 # Load PostgreSQL Data
 def load_data():
@@ -72,22 +95,46 @@ def load_data():
         rows = cur.fetchall()
     return pd.DataFrame(rows)
 
-# Insert new row into database
+# Insert row with automatic attack type detection
 def insert_row(data):
     conn = get_connection()
+
+    # Auto-assign attack_type if not manually filled
+    if 'attack_type' not in data or not data['attack_type']:
+        eventid = data.get('eventid', '')
+        input_cmd = data.get('input', '')
+        message = data.get('message', '')
+        data['attack_type'] = detect_attack_type(eventid, input_cmd, message)
+
     with conn.cursor() as cur:
         placeholders = ', '.join(['%s'] * len(data))
         columns = ', '.join(data.keys())
         sql = f"INSERT INTO hornet7_data ({columns}) VALUES ({placeholders})"
         cur.execute(sql, list(data.values()))
         conn.commit()
+
     send_telegram_alert(data, source="Manual")
 
-# Update message by session
-def update_message(session_id, new_message):
+
+# Update row with auto re-detection of attack type
+def update_row(row_id, data):
     conn = get_connection()
+
+    # Auto-reassign attack_type if eventid, input, or message changed
+    if any(k in data for k in ['eventid', 'input', 'message']):
+        eventid = data.get('eventid', '')
+        input_cmd = data.get('input', '')
+        message = data.get('message', '')
+        data['attack_type'] = detect_attack_type(eventid, input_cmd, message)
+
+    set_clause = ', '.join([f"{col} = %s" for col in data.keys()])
+    values = list(data.values())
+    values.append(row_id)
+
+    sql = f"UPDATE hornet7_data SET {set_clause} WHERE id = %s"
+
     with conn.cursor() as cur:
-        cur.execute("UPDATE hornet7_data SET message = %s WHERE session = %s", (new_message, session_id))
+        cur.execute(sql, values)
         conn.commit()
 
 # Delete row by session
@@ -256,23 +303,29 @@ if not df.empty:
 
     st.markdown("---")
 
-    # Session Management
-    st.subheader("🛠️ Manage Sessions")
-
     with st.expander("➕ Insert New Row"):
-        new_data = {col: st.text_input(f"{col}", key=f"insert_{col}") for col in df.columns}
+        new_data = {}
+        for col in df.columns:
+            if col != "attack_type":  # <-- Skip asking for attack_type
+                new_data[col] = st.text_input(f"{col}", key=f"insert_{col}")
         if st.button("Insert"):
             insert_row(new_data)
             st.success("Inserted! Refreshing...")
             st.rerun()
 
-    with st.expander("✏️ Update Message by Session ID"):
-        sid = st.text_input("Session ID:")
-        new_msg = st.text_input("New Message:")
-        if st.button("Update"):
-            update_message(sid, new_msg)
-            st.success("Updated! Refreshing...")
-            st.rerun()
+
+    with st.expander("✏️ Update Sessions"):
+        row_id_to_update = st.text_input("Row ID to update")
+        if row_id_to_update:
+            updated_data = {}
+            for col in df.columns:
+                if col != "attack_type":  # Skip editing attack_type manually
+                    updated_data[col] = st.text_input(f"{col} (new value)", key=f"update_{col}")
+            if st.button("Update"):
+                update_row(row_id_to_update, updated_data)
+                st.success("Updated! Refreshing...")
+                st.rerun()
+
 
     with st.expander("❌ Delete by Session ID"):
         sid_del = st.text_input("Session ID to delete:")
