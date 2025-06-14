@@ -12,6 +12,7 @@ import networkx as nx
 import tempfile
 import os
 import re
+from sqlalchemy import create_engine
 
 # --- Configuration ---
 DB_HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
@@ -54,23 +55,16 @@ RECON_PATTERNS = [
 
 BRUTE_FORCE_THRESHOLD = 5
 
-# --- Optimized Functions ---
-
+# --- SQLAlchemy Engine ---
 @st.cache_resource
-def get_connection():
-    return psycopg2.connect(
-        host=DB_HOST,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS,
-        port=DB_PORT,
-        cursor_factory=RealDictCursor,
-        sslmode='require'
-    )
+def get_engine():
+    connection_string = f"postgresql+psycopg2://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    return create_engine(connection_string, connect_args={'sslmode': 'require'})
 
+# --- Optimized Functions ---
 @st.cache_data(ttl=60)
 def load_data():
-    conn = get_connection()
+    engine = get_engine()
     query = """
         SELECT *, 
                COUNT(*) OVER (PARTITION BY src_ip, eventid) as attempt_count
@@ -78,7 +72,7 @@ def load_data():
         ORDER BY timestamp DESC 
         LIMIT 500
     """
-    df = pd.read_sql(query, conn)
+    df = pd.read_sql(query, engine)
     
     # Apply attack detection
     attack_info = df.apply(detect_attack_type, axis=1)
@@ -258,7 +252,7 @@ if not df.empty:
                 width="100%", 
                 directed=True, 
                 notebook=False,
-                cdn_resources="remote"  # Changed to remote to fix JS import
+                cdn_resources="remote"
             )
             
             # Stabilize the graph
