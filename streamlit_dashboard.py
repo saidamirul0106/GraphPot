@@ -68,7 +68,7 @@ def get_connection():
         sslmode='require'
     )
 
-@st.cache_data(ttl=60)  # Cache data for 60 seconds
+@st.cache_data(ttl=60)
 def load_data():
     conn = get_connection()
     query = """
@@ -76,7 +76,7 @@ def load_data():
                COUNT(*) OVER (PARTITION BY src_ip, eventid) as attempt_count
         FROM hornet7_data 
         ORDER BY timestamp DESC 
-        LIMIT 500  -- Reduced limit for performance
+        LIMIT 500
     """
     df = pd.read_sql(query, conn)
     
@@ -162,14 +162,18 @@ def build_session_graph(row):
                   color=color_map.get(attack_type, "grey"))
     
     if eventid and dst_port:
-        G.add_edge(eventid, f"Port {dst_port}", 
+        G.add_edge(eventid, port_node, 
                   title=f"Target port: {dst_port}",
                   color="#888888")
     
     return G
 
 # --- Dashboard Layout ---
-st.set_page_config(page_title="GraphPot - Network Session Analysis", layout="wide")
+st.set_page_config(
+    page_title="GraphPot - Network Session Analysis", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 st.title("🛡️ GraphPot - Network Session Analysis")
 
 if st.button("🔄 Refresh"):
@@ -184,11 +188,16 @@ with st.spinner('Loading threat data...'):
 if not df.empty:
     # --- Summary Metrics ---
     st.subheader("📊 Attack Summary")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("🔒 Brute Force", (df['attack_type'] == "Brute Force Attack").sum())
-    col2.metric("🐍 Malware Download", (df['attack_type'] == "Malware Download Attempt").sum())
-    col3.metric("🔥 Wiper Attack", (df['attack_type'] == "Destructive Attack (Wiper)").sum())
-    col4.metric("🕵️ Reconnaissance", (df['attack_type'] == "Reconnaissance / Enumeration").sum())
+    cols = st.columns(4)
+    metrics = [
+        ("🔒 Brute Force", "Brute Force Attack"),
+        ("🐍 Malware Download", "Malware Download Attempt"),
+        ("🔥 Wiper Attack", "Destructive Attack (Wiper)"),
+        ("🕵️ Reconnaissance", "Reconnaissance / Enumeration")
+    ]
+    
+    for (icon, metric), col in zip(metrics, cols):
+        col.metric(icon, (df['attack_type'] == metric).sum())
 
     st.markdown("---")
 
@@ -249,7 +258,7 @@ if not df.empty:
                 width="100%", 
                 directed=True, 
                 notebook=False,
-                cdn_resources="in_line"
+                cdn_resources="remote"  # Changed to remote to fix JS import
             )
             
             # Stabilize the graph
@@ -263,11 +272,7 @@ if not df.empty:
             )
             
             # Add nodes and edges
-            for node, data in G.nodes(data=True):
-                net.add_node(node, **data)
-                
-            for src, dst, data in G.edges(data=True):
-                net.add_edge(src, dst, **data)
+            net.from_nx(G)
             
             # Save and display
             with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
