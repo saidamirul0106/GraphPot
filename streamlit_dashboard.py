@@ -12,7 +12,6 @@ import networkx as nx
 import tempfile
 import os
 import re
-from sqlalchemy import create_engine
 
 # --- Configuration ---
 DB_HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
@@ -55,31 +54,46 @@ RECON_PATTERNS = [
 
 BRUTE_FORCE_THRESHOLD = 5
 
-# --- SQLAlchemy Engine ---
-@st.cache_resource
-def get_engine():
-    connection_string = f"postgresql+psycopg2://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    return create_engine(connection_string, connect_args={'sslmode': 'require'})
-
 # --- Optimized Functions ---
+
+@st.cache_resource
+def get_connection():
+    return psycopg2.connect(
+        host=DB_HOST,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASS,
+        port=DB_PORT,
+        cursor_factory=RealDictCursor,
+        sslmode='require'
+    )
+
 @st.cache_data(ttl=60)
 def load_data():
-    engine = get_engine()
-    query = """
-        SELECT *, 
-               COUNT(*) OVER (PARTITION BY src_ip, eventid) as attempt_count
-        FROM hornet7_data 
-        ORDER BY timestamp DESC 
-        LIMIT 500
-    """
-    df = pd.read_sql(query, engine)
-    
-    # Apply attack detection
-    attack_info = df.apply(detect_attack_type, axis=1)
-    df['attack_type'] = attack_info.apply(lambda x: x[0])
-    df['attack_details'] = attack_info.apply(lambda x: x[1])
-    
-    return df
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT *, 
+                       COUNT(*) OVER (PARTITION BY src_ip, eventid) as attempt_count
+                FROM hornet7_data 
+                ORDER BY timestamp DESC 
+                LIMIT 500
+            """)
+            rows = cur.fetchall()
+            df = pd.DataFrame(rows)
+            
+            # Apply attack detection
+            attack_info = []
+            for _, row in df.iterrows():
+                attack_info.append(detect_attack_type(row))
+            
+            df['attack_type'] = [x[0] for x in attack_info]
+            df['attack_details'] = [x[1] for x in attack_info]
+            
+            return df
+    finally:
+        conn.close()
 
 def detect_attack_type(row):
     eventid = row.get('eventid', '').lower()
