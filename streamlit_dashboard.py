@@ -66,30 +66,6 @@ ATTACK_COLORS = {
     "Failed Login": "#F8F9FA"
 }
 
-# --- Penetration Testing Commands ---
-PENTEST_COMMANDS = {
-    "Brute Force Attack": [
-        "hydra -L users.txt -P passwords.txt ssh://<TARGET_IP>",
-        "medusa -h <TARGET_IP> -U users.txt -P passwords.txt -M ssh"
-    ],
-    "Malware Download Attempt": [
-        "wget http://www.eicar.org/download/eicar.com -O /tmp/eicar_test",
-        "curl -o /tmp/eicar_test http://www.eicar.org/download/eicar.com.txt"
-    ],
-    "Destructive Attack (Wiper)": [
-        "rm -rf /important/directory/*",
-        "dd if=/dev/zero of=/dev/sda bs=1M"
-    ],
-    "Reconnaissance / Enumeration": [
-        "nmap -sV -T4 <TARGET_IP>",
-        "gobuster dir -u http://<TARGET_IP> -w /usr/share/wordlists/dirb/common.txt"
-    ],
-    "Port Scanning / Connection Attempt": [
-        "nc -zv <TARGET_IP> 1-1000",
-        "masscan -p1-1000 <TARGET_IP> --rate=1000"
-    ]
-}
-
 # --- Database Functions ---
 @st.cache_resource
 def get_connection():
@@ -286,16 +262,6 @@ def main():
         )
 
         st.markdown("---")
-
-        # --- Penetration Testing Guide ---
-        with st.expander("🔓 Penetration Testing Commands (Click to Expand)"):
-            st.write("Use these commands to simulate attacks for testing:")
-            
-            for attack_type, commands in PENTEST_COMMANDS.items():
-                st.markdown(f"**{attack_type}**")
-                for cmd in commands:
-                    st.code(cmd, language='bash')
-                st.markdown("---")
 
         # --- Highlight Table ---
         st.subheader("📋 Latest Captured Sessions")
