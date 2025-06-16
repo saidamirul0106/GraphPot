@@ -301,7 +301,30 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded"
     )
+    
     st.title("🛡️ GraphPot - Network Session Analysis")
+    
+    # Connection diagnostics
+    with st.expander("🔍 Connection Diagnostics", expanded=True):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Network Test")
+            if st.button("Test Network Connectivity"):
+                test_network()
+        
+        with col2:
+            st.subheader("Database Test")
+            if st.button("Test Database Connection"):
+                test_db_connection()
+    
+    # Only proceed if both tests pass
+    if not (test_network() and test_db_connection()):
+        st.error("""
+        ❌ Critical connection issues detected. 
+        Please resolve these before continuing.
+        """)
+        return
 
     if st.button("🔄 Refresh"):
         st.rerun()
