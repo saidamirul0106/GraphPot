@@ -12,6 +12,8 @@ import networkx as nx
 import tempfile
 import os
 import re
+import random
+from datetime import datetime
 
 # --- Configuration ---
 DB_HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
@@ -165,7 +167,69 @@ def detect_attack_type(row):
         return "Port Scanning / Connection Attempt", f"Connection to port {row.get('dst_port')}"
     
     return "Unknown Activity", message[:100]
+# --- Data Manipulation Section ---
+st.header("📝 Data Management")
 
+# Auto-insert in sidebar
+st.sidebar.header("🧪 Test Data Generator")
+attack_type = st.sidebar.selectbox(
+    "Select attack type:",
+    ["Brute Force", "Malware Download", "Wiper Attack", "Reconnaissance", "Port Scan"]
+)
+
+if st.sidebar.button("🚀 Auto Insert"):
+    test_data = {
+        "timestamp": datetime.now().isoformat(),
+        "src_ip": f"10.0.{random.randint(1,255)}.{random.randint(1,255)}",
+        "session": f"TEST-{random.randint(1000,9999)}",
+        "attack_type": attack_type,
+        "dst_port": str(random.choice([22, 80, 443, 8080]))
+    }
+    
+    # Attack-specific fields
+    if attack_type == "Brute Force":
+        test_data.update({
+            "eventid": "cowrie.login.failed",
+            "attempt_count": random.randint(5,20)
+        })
+    elif attack_type == "Port Scan":
+        test_data.update({
+            "eventid": "cowrie.session.connect",
+            "message": f"Scan detected on port {test_data['dst_port']}"
+        })
+    # Add other attack types...
+    
+    insert_row(test_data)
+    st.sidebar.success(f"Inserted {attack_type} test case!")
+    st.rerun()
+
+# Manual controls in main panel
+with st.expander("🛠️ Manual Data Controls"):
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("➕ Insert New")
+        new_data = {
+            "timestamp": st.text_input("Timestamp", datetime.now().isoformat()),
+            "src_ip": st.text_input("Source IP", "192.168.1.1"),
+            "eventid": st.selectbox("Event Type", ["login.failed", "command.input", "session.connect"])
+        }
+        if st.button("Insert"):
+            insert_row(new_data)
+            st.success("Inserted!")
+    
+    with col2:
+        st.subheader("✏️ Update Existing")
+        session_id = st.text_input("Session ID to update")
+        if st.button("Update"):
+            update_row(session_id, {"status": "investigating"})
+            st.success("Updated!")
+        
+        st.subheader("❌ Delete Record")
+        del_id = st.text_input("Session ID to delete")
+        if st.button("Delete"):
+            delete_row(del_id)
+            st.success("Deleted!")
 # --- Visualization ---
 def build_session_graph(row):
     """Create network graph for a session"""
