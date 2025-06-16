@@ -20,7 +20,7 @@ import time
 DB_HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
 DB_NAME = "postgres"
 DB_USER = "postgres.ypsdflhceqxrjwyxvclr"
-DB_PASS = "Serigala76!" # <--- STILL VERIFY THIS PASSWORD CAREFULLY!
+DB_PASS = "Serigala76!"  # Verify this is correct in Supabase dashboard
 DB_PORT = 5432
 
 TELEGRAM_TOKEN = "8083560973:AAGoQstYrKVGVSIincqQ3r_MyGvurDVtNMo"
@@ -67,6 +67,61 @@ ATTACK_COLORS = {
 }
 
 # --- Database Functions ---
+def verify_supabase_connection():
+    """Test all aspects of Supabase connection"""
+    results = {
+        'network': False,
+        'auth': False,
+        'table': False
+    }
+    
+    # Test network connectivity
+    try:
+        with socket.create_connection((DB_HOST, DB_PORT), timeout=10) as sock:
+            results['network'] = True
+    except Exception as e:
+        st.error(f"Network test failed: {str(e)}")
+        return results
+    
+    # Test database authentication
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASS,
+            port=DB_PORT,
+            sslmode="require",
+            connect_timeout=10
+        )
+        conn.close()
+        results['auth'] = True
+    except psycopg2.OperationalError as e:
+        st.error(f"Connection failed: {str(e)}")
+        return results
+    except psycopg2.ProgrammingError as e:
+        st.error(f"Authentication failed: {str(e)}")
+        return results
+    
+    # Test table access
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASS,
+            port=DB_PORT,
+            sslmode="require"
+        )
+        with conn.cursor() as cur:
+            cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'hornet7_data')")
+            results['table'] = cur.fetchone()[0]
+        conn.close()
+    except Exception as e:
+        st.error(f"Table access test failed: {str(e)}")
+    
+    return results
+
 @st.cache_resource(ttl=3600)
 def get_connection():
     """Create and cache database connection with comprehensive error handling"""
@@ -78,49 +133,47 @@ def get_connection():
         "port": DB_PORT,
         "cursor_factory": RealDictCursor,
         "sslmode": "require",
-        "connect_timeout": 10
+        "connect_timeout": 10,
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5
     }
     
-    st.info(f"Attempting to connect to DB: {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
     try:
+        # Attempt connection
         conn = psycopg2.connect(**connection_params)
         
+        # Verify connection works
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             result = cur.fetchone()
-            if result is None or result[0] != 1:
-                raise ValueError("Connection test failed: SELECT 1 did not return expected value.")
+            if not result or result[0] != 1:
+                raise ValueError("Connection test failed")
         
-        st.success("✅ Database connection established successfully!")
+        # Set connection to auto-reconnect
+        conn.autocommit = False
         return conn
         
     except psycopg2.OperationalError as e:
         st.error(f"""
-        ❌ Database connection failed (OperationalError):
-        - Check your internet connection
+        ❌ Connection failed (OperationalError):
+        - Check network connectivity to {DB_HOST}:{DB_PORT}
         - Verify database is running
-        - Confirm host/port are correct
-        - Firewall might be blocking port {DB_PORT}
-        Error details: `{str(e)}`
+        - Error: {str(e)}
         """)
-        print(f"DEBUG: OperationalError in get_connection: {e}")
-    except psycopg2.Error as e:
+    except psycopg2.ProgrammingError as e:
         st.error(f"""
-        ❌ PostgreSQL error:
-        - Check your credentials (user/password)
-        - Verify user permissions for database '{DB_NAME}'
-        - Ensure `sslmode='require'` is appropriate for your Supabase setup
-        Error details: `{str(e)}`
+        ❌ Authentication failed (ProgrammingError):
+        - Verify username/password are correct
+        - Check user permissions
+        - Error: {str(e)}
         """)
-        print(f"DEBUG: Psycopg2Error in get_connection: {e}")
     except Exception as e:
         st.error(f"""
-        ❌ Unexpected error during database connection:
-        - Please check all parameters (host, name, user, password, port) for typos.
-        - Ensure your Supabase database is active and not paused.
-        Error details: `{str(e)}`
+        ❌ Unexpected connection error:
+        - Error: {str(e)}
         """)
-        print(f"DEBUG: Generic Exception in get_connection: {e}")
     
     return None
 
@@ -128,7 +181,7 @@ def execute_query(query, params=None):
     """Execute SQL query with robust connection handling"""
     conn = None
     max_retries = 2
-    retry_delay = 2 
+    retry_delay = 2  # seconds
     
     for attempt in range(max_retries + 1):
         try:
@@ -141,7 +194,7 @@ def execute_query(query, params=None):
                 st.info(f"Executing query (attempt {attempt + 1}/{max_retries + 1}): `{query.strip().splitlines()[0]}...`")
                 cur.execute(query, params or ())
                 
-                if cur.description:  
+                if cur.description:  # If query returns results
                     results = cur.fetchall()
                     st.info(f"Query returned {len(results)} rows.")
                     return results
@@ -157,93 +210,22 @@ def execute_query(query, params=None):
                 time.sleep(retry_delay)
                 continue
             st.error(f"❌ Query failed after retries (Interface/Operational Error): `{str(e)}`")
-            print(f"DEBUG: Query failed after retries: {e}")
             return None
         except psycopg2.Error as e:
             st.error(f"❌ PostgreSQL error during query execution: `{str(e)}`")
-            print(f"DEBUG: Psycopg2Error during execute_query: {e}")
             return None
         except Exception as e:
             st.error(f"❌ Unexpected error during query execution: `{str(e)}`")
-            print(f"DEBUG: Generic Exception during execute_query: {e}")
             return None
         finally:
-            pass
-
-def test_network():
-    """Test network connectivity to database host"""
-    try:
-        with st.spinner(f"Testing connection to {DB_HOST}:{DB_PORT}..."):
-            sock = socket.create_connection((DB_HOST, DB_PORT), timeout=5)
-            sock.close()
-            st.success("✅ Network connection to database host successful!")
-            return True
-    except Exception as e:
-        st.error(f"""
-        ❌ Network connection failed to `{DB_HOST}:{DB_PORT}`:
-        Error details: `{str(e)}`
-        
-        Possible issues:
-        1. Firewall blocking outbound port {DB_PORT} from where Streamlit is running.
-        2. DNS resolution failure for `{DB_HOST}`.
-        3. Database host `{DB_HOST}` is unreachable or incorrect.
-        """)
-        print(f"DEBUG: Network test failed: {e}")
-        return False
-
-def test_db_connection():
-    """Test database connectivity with detailed feedback"""
-    with st.spinner("Testing database connection..."):
-        try:
-            conn = psycopg2.connect(
-                host=DB_HOST,
-                dbname=DB_NAME,
-                user=DB_USER,
-                password=DB_PASS,
-                port=DB_PORT,
-                sslmode="require",
-                connect_timeout=10
-            )
-            
-            with conn.cursor() as cur:
-                cur.execute("SELECT version()")
-                version = cur.fetchone()
-                
-                cur.execute("SELECT current_database()")
-                db_name = cur.fetchone()
-                
-                cur.execute("SELECT current_user")
-                db_user = cur.fetchone()
-                
-            conn.close() 
-
-            st.success("✅ Direct database connection successful!")
-            st.json({
-                "PostgreSQL Version": version[0] if version else "N/A",
-                "Database Name": db_name[0] if db_name else "N/A",
-                "Connected As": db_user[0] if db_user else "N/A"
-            })
-            return True
-            
-        except Exception as e:
-            st.error(f"""
-            ❌ Direct database connection failed:
-            Error details: `{str(e)}`
-            
-            Troubleshooting steps:
-            1. **Verify your credentials (`DB_USER`, `DB_PASS`) in Supabase dashboard.**
-            2. Check network connectivity (firewall, routing).
-            3. Ensure SSL is enabled and correctly configured on both client and server (Supabase requires `sslmode=require`).
-            4. Confirm database instance is running and not paused in Supabase.
-            """)
-            print(f"DEBUG: Direct DB connection test failed: {e}")
-            return False
+            if conn:
+                conn.close()
 
 @st.cache_data(ttl=60)
 def load_data():
     """Load and process data from database"""
     st.info("Attempting to load data from 'hornet7_data' table...")
-    # UPDATED: Explicitly select all columns as provided
+    
     query = """
         SELECT
             id,
@@ -278,19 +260,19 @@ def load_data():
             shasum,
             duplicate,
             keyalgs,
-            attack_type, -- Include if it exists in DB, will be overwritten by detect_attack_type
             COUNT(*) OVER (PARTITION BY src_ip, eventid) as calculated_attempt_count
         FROM hornet7_data
         ORDER BY timestamp DESC
         LIMIT 500
     """
+    
     rows = execute_query(query)
     
     if rows is None:
-        st.warning("⚠️ No data retrieved from the database. This could mean the table is empty, or there was a query/connection issue. Check console for `execute_query` errors.")
+        st.warning("⚠️ No data retrieved from the database. This could mean the table is empty, or there was a query/connection issue.")
         return pd.DataFrame()
     if not rows: 
-        st.warning("⚠️ Query executed, but no rows were returned. The `hornet7_data` table might be empty.")
+        st.warning("⚠️ Query executed, but no rows were returned. The 'hornet7_data' table might be empty.")
         return pd.DataFrame()
         
     df = pd.DataFrame(rows)
@@ -373,33 +355,33 @@ def build_session_graph(row):
     
     if src_ip:
         G.add_node(f"src_ip_{src_ip}", 
-                    label=f"Source: {src_ip}",
-                    color=color_map.get(attack_type, "lightblue"),
-                    shape="box")
+                  label=f"Source: {src_ip}",
+                  color=color_map.get(attack_type, "lightblue"),
+                  shape="box")
     
     if eventid:
         G.add_node(f"event_{eventid}", 
-                    label=f"Event: {eventid}",
-                    color="#F0F0F0", 
-                    shape="ellipse")
+                  label=f"Event: {eventid}",
+                  color="#F0F0F0", 
+                  shape="ellipse")
     
     if dst_port:
         port_node = f"Port {dst_port}"
         G.add_node(f"port_{dst_port}", 
-                    label=port_node,
-                    color="#D8BFD8", 
-                    shape="diamond")
+                  label=port_node,
+                  color="#D8BFD8", 
+                  shape="diamond")
     
     # Add edges
     if src_ip and eventid:
         G.add_edge(f"src_ip_{src_ip}", f"event_{eventid}", 
-                    title=f"Attack: {attack_type}",
-                    color=color_map.get(attack_type, "grey"))
+                  title=f"Attack: {attack_type}",
+                  color=color_map.get(attack_type, "grey"))
     
     if eventid and dst_port:
         G.add_edge(f"event_{eventid}", f"port_{dst_port}", 
-                    title=f"Target port: {dst_port}",
-                    color="#888888")
+                  title=f"Target port: {dst_port}",
+                  color="#888888")
     
     return G
 
@@ -412,36 +394,31 @@ def main():
     
     st.title("🛡️ GraphPot - Network Session Analysis")
     
-    # Connection diagnostics
-    with st.expander("🔍 Connection Diagnostics", expanded=True):
-        col1, col2 = st.columns(2)
-        
-        network_ok = False
-        db_ok = False
-
-        with col1:
-            st.subheader("Network Test")
-            if st.button("Test Network Connectivity", key="test_net_btn_manual"):
-                network_ok = test_network()
+    # Connection verification
+    with st.expander("🔍 Connection Verification", expanded=True):
+        if st.button("Run Connection Tests"):
+            test_results = verify_supabase_connection()
+            
+            if test_results['network']:
+                st.success("✅ Network connectivity test passed")
             else:
-                network_ok = test_network() 
-        
-        with col2:
-            st.subheader("Database Test")
-            if st.button("Test Database Connection", key="test_db_btn_manual"):
-                db_ok = test_db_connection()
+                st.error("❌ Network test failed - check host/port")
+                
+            if test_results['auth']:
+                st.success("✅ Database authentication test passed")
             else:
-                db_ok = test_db_connection() 
-    
-    if not (network_ok and db_ok):
-        st.error("""
-        ❌ Critical connection issues detected. Please review the diagnostics above.
-        Resolve these issues (e.g., incorrect credentials, firewall) before the dashboard can load.
-        """)
-        st.cache_resource.clear()
-        return 
-        
-    st.success("✅ All systems operational - loading dashboard...")
+                st.error("❌ Authentication failed - check username/password")
+                
+            if test_results['table']:
+                st.success("✅ Table access test passed")
+            else:
+                st.error("❌ Table 'hornet7_data' not found or inaccessible")
+            
+            if all(test_results.values()):
+                st.success("✅ All connection tests passed!")
+            else:
+                st.error("❌ Connection issues detected - fix before proceeding")
+                return
     
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear() 
@@ -451,19 +428,19 @@ def main():
 
     # --- Auto Test Data Generator ---
     st.sidebar.header("🧪 Test Data Generator")
-    attack_type_gen = st.sidebar.selectbox( # Renamed variable to avoid conflict with function name
+    attack_type_gen = st.sidebar.selectbox(
         "Select attack type to generate:",
         ["Brute Force", "Malware Download", "Wiper Attack", "Reconnaissance", "Port Scan"]
     )
     
     if st.sidebar.button("🚀 Auto Insert Test Data"):
-        current_time = datetime.now().isoformat() # Use ISO format for TIMESTAMPTZ
+        current_time = datetime.now().isoformat()
         test_data = {
             "timestamp": current_time,
-            "created_at": current_time, # For created_at column if not auto-managed by DB
+            "created_at": current_time,
             "src_ip": f"10.0.{random.randint(1,255)}.{random.randint(1,255)}",
             "src_port": random.randint(1024, 65535),
-            "dst_ip": "172.16.0.1", # Dummy internal IP
+            "dst_ip": "172.16.0.1",
             "dst_port": random.choice([22, 80, 443, 8080]),
             "session": f"TEST-{random.randint(1000,9999)}",
             "protocol": "ssh",
@@ -483,13 +460,13 @@ def main():
             "width": 80,
             "height": 24,
             "arch": "x86_64",
-            "input": "", # Will be filled based on attack type
-            "ttylog": None, # Assuming bytea or text, can be None
+            "input": "",
+            "ttylog": None,
             "size": 0,
             "shasum": "",
             "duplicate": False,
             "keyalgs": "ssh-rsa",
-            "attack_type": "Unknown Activity" # Default, will be overwritten by detection
+            "attack_type": "Unknown Activity"
         }
         
         if attack_type_gen == "Brute Force":
@@ -530,47 +507,12 @@ def main():
                 "attack_type": "Port Scanning / Connection Attempt"
             })
         
-        # UPDATED: Insert into 'hornet7_data' with ALL columns
         insert_query = """
             INSERT INTO hornet7_data 
             (created_at, eventid, timestamp, username, password, src_ip, src_port, dst_ip, dst_port, session, protocol, duration, message, sensor, version, hassh, hasshalgorithms, kexalgs, enccs, maccs, compcs, langcs, width, height, arch, input, ttylog, size, shasum, duplicate, keyalgs, attack_type)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (session) DO UPDATE SET
-                created_at = EXCLUDED.created_at,
-                eventid = EXCLUDED.eventid,
-                timestamp = EXCLUDED.timestamp,
-                username = EXCLUDED.username,
-                password = EXCLUDED.password,
-                src_ip = EXCLUDED.src_ip,
-                src_port = EXCLUDED.src_port,
-                dst_ip = EXCLUDED.dst_ip,
-                dst_port = EXCLUDED.dst_port,
-                protocol = EXCLUDED.protocol,
-                duration = EXCLUDED.duration,
-                message = EXCLUDED.message,
-                sensor = EXCLUDED.sensor,
-                version = EXCLUDED.version,
-                hassh = EXCLUDED.hassh,
-                hasshalgorithms = EXCLUDED.hasshalgorithms,
-                kexalgs = EXCLUDED.kexalgs,
-                enccs = EXCLUDED.enccs,
-                maccs = EXCLUDED.maccs,
-                compcs = EXCLUDED.compcs,
-                langcs = EXCLUDED.langcs,
-                width = EXCLUDED.width,
-                height = EXCLUDED.height,
-                arch = EXCLUDED.arch,
-                input = EXCLUDED.input,
-                ttylog = EXCLUDED.ttylog,
-                size = EXCLUDED.size,
-                shasum = EXCLUDED.shasum,
-                duplicate = EXCLUDED.duplicate,
-                keyalgs = EXCLUDED.keyalgs,
-                attack_type = EXCLUDED.attack_type;
-            """
-        # Ensure that 'session' column has a UNIQUE constraint or is a PRIMARY KEY
-        # for ON CONFLICT to work as intended.
-
+        """
+        
         insert_params = (
             test_data.get('created_at'),
             test_data.get('eventid'),
@@ -656,7 +598,7 @@ def main():
                     manual_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     new_data = {
                         "timestamp": st.text_input("Timestamp (YYYY-MM-DD HH:MM:SS)", manual_time),
-                        "created_at": st.text_input("Created At (YYYY-MM-DD HH:MM:SS)", manual_time), # Or let DB handle if it's DEFAULT NOW()
+                        "created_at": st.text_input("Created At (YYYY-MM-DD HH:MM:SS)", manual_time),
                         "src_ip": st.text_input("Source IP", "192.168.1.1"),
                         "src_port": st.number_input("Source Port", value=random.randint(1024, 65535), min_value=1, max_value=65535, step=1),
                         "dst_ip": st.text_input("Destination IP", "172.16.0.1"),
@@ -687,52 +629,19 @@ def main():
                         "width": st.number_input("Width", value=80, min_value=1),
                         "height": st.number_input("Height", value=24, min_value=1),
                         "arch": st.text_input("Arch", "x86_64"),
-                        "ttylog": None, # Or a default string/bytes if needed
+                        "ttylog": None,
                         "size": st.number_input("Size", value=0, min_value=0),
                         "shasum": st.text_input("SHASUM", ""),
                         "duplicate": st.checkbox("Duplicate", value=False),
                         "keyalgs": st.text_input("Key Algs", "ssh-rsa"),
-                        "attack_type": st.text_input("Attack Type (optional)", "Unknown Activity") # Will be overwritten by detection
+                        "attack_type": st.text_input("Attack Type (optional)", "Unknown Activity")
                     }
 
                     if st.form_submit_button("Insert Entry"):
-                        # UPDATED: Insert into 'hornet7_data' with ALL columns
                         insert_query_manual = """
                             INSERT INTO hornet7_data 
                             (created_at, eventid, timestamp, username, password, src_ip, src_port, dst_ip, dst_port, session, protocol, duration, message, sensor, version, hassh, hasshalgorithms, kexalgs, enccs, maccs, compcs, langcs, width, height, arch, input, ttylog, size, shasum, duplicate, keyalgs, attack_type)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (session) DO UPDATE SET
-                                created_at = EXCLUDED.created_at,
-                                eventid = EXCLUDED.eventid,
-                                timestamp = EXCLUDED.timestamp,
-                                username = EXCLUDED.username,
-                                password = EXCLUDED.password,
-                                src_ip = EXCLUDED.src_ip,
-                                src_port = EXCLUDED.src_port,
-                                dst_ip = EXCLUDED.dst_ip,
-                                dst_port = EXCLUDED.dst_port,
-                                protocol = EXCLUDED.protocol,
-                                duration = EXCLUDED.duration,
-                                message = EXCLUDED.message,
-                                sensor = EXCLUDED.sensor,
-                                version = EXCLUDED.version,
-                                hassh = EXCLUDED.hassh,
-                                hasshalgorithms = EXCLUDED.hasshalgorithms,
-                                kexalgs = EXCLUDED.kexalgs,
-                                enccs = EXCLUDED.enccs,
-                                maccs = EXCLUDED.maccs,
-                                compcs = EXCLUDED.compcs,
-                                langcs = EXCLUDED.langcs,
-                                width = EXCLUDED.width,
-                                height = EXCLUDED.height,
-                                arch = EXCLUDED.arch,
-                                input = EXCLUDED.input,
-                                ttylog = EXCLUDED.ttylog,
-                                size = EXCLUDED.size,
-                                shasum = EXCLUDED.shasum,
-                                duplicate = EXCLUDED.duplicate,
-                                keyalgs = EXCLUDED.keyalgs,
-                                attack_type = EXCLUDED.attack_type;
                         """ 
                         insert_params_manual = (
                             new_data.get('created_at'),
@@ -780,9 +689,6 @@ def main():
                 with st.form("update_form"):
                     session_ids_for_update = [""] + sorted(df['session'].unique().tolist()) if 'session' in df.columns else [""]
                     session_id_to_update = st.selectbox("Select Session ID to update", session_ids_for_update, key="update_session_select")
-                    # Assuming you want to update a 'status' column which is not directly listed in your provided columns
-                    # If 'status' is not a column in hornet7_data, you'll get an error here.
-                    # You might need to add a 'status' column to your table if you intend to use this feature.
                     new_status = st.selectbox("Update Status", [
                         "investigating", 
                         "resolved", 
@@ -791,11 +697,9 @@ def main():
                     ])
                     if st.form_submit_button("Update Status"):
                         if session_id_to_update:
-                            # UPDATED: Update 'hornet7_data' - ASSUMES 'status' COLUMN EXISTS
-                            # If 'status' does not exist, this UPDATE will fail.
                             if execute_query("""
                                 UPDATE hornet7_data 
-                                SET attack_type = %s -- Assuming you meant to update 'attack_type' or you have a 'status' column
+                                SET attack_type = %s
                                 WHERE session = %s
                                 """, 
                                 (new_status, session_id_to_update)
@@ -814,7 +718,6 @@ def main():
                     del_id = st.selectbox("Select Session ID to delete", session_ids_for_delete, key="delete_session_select")
                     if st.form_submit_button("Delete Entry"):
                         if del_id:
-                            # UPDATED: Delete from 'hornet7_data'
                             if execute_query("""
                                 DELETE FROM hornet7_data 
                                 WHERE session = %s
@@ -840,7 +743,6 @@ def main():
         attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique().tolist()))
         filtered_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
         
-        # UPDATED: Display relevant columns from your hornet7_data table
         st.dataframe(
             filtered_df[['timestamp', 'src_ip', 'eventid', 'attack_type', 'dst_port', 'session', 'username', 'protocol', 'message']] 
             .style.apply(highlight_rows, axis=1),
@@ -935,8 +837,7 @@ def main():
                             )
                         os.unlink(tmp_file.name) 
                     except Exception as e:
-                        st.error(f"Failed to render network graph: {e}. Check if graph has nodes/edges.")
-                        print(f"DEBUG: Graph render error: {e}")
+                        st.error(f"Failed to render network graph: {e}")
 
                 st.markdown(f"""
                 <div style="background-color:{bg_color}; padding:15px; border-radius:10px">
