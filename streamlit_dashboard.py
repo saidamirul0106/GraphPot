@@ -12,7 +12,6 @@ import networkx as nx
 import tempfile
 import os
 import re
-from sqlalchemy import create_engine
 
 # --- Configuration ---
 DB_HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
@@ -55,28 +54,60 @@ RECON_PATTERNS = [
 
 BRUTE_FORCE_THRESHOLD = 5
 
-# --- SQLAlchemy Engine ---
-# --- Optimized Functions ---
+# --- Attack Color Mapping ---
+ATTACK_COLORS = {
+    "Brute Force Attack": "#D1ECF1",
+    "Destructive Attack (Wiper)": "#FFB6B6",
+    "Malware Download Attempt": "#FFF3CD",
+    "Reconnaissance / Enumeration": "#E2E3E5",
+    "Port Scanning / Connection Attempt": "#D4EDDA",
+    "Command Injection Attempt": "#F8D7DA",
+    "Successful Login": "#D1E7DD",
+    "Failed Login": "#F8F9FA"
+}
 
+# --- Database Functions ---
 @st.cache_resource
-def get_engine():
-    connection_string = f"postgresql+psycopg2://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    return create_engine(connection_string, connect_args={'sslmode': 'require'})
 def get_connection():
-    return psycopg2.connect(
-        host=DB_HOST,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS,
-        port=DB_PORT,
-        cursor_factory=RealDictCursor,
-        sslmode='require'
-    )
+    """Create and cache database connection"""
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASS,
+            port=DB_PORT,
+            cursor_factory=RealDictCursor,
+            sslmode='require'
+        )
+        return conn
+    except Exception as e:
+        st.error(f"❌ Database connection failed: {str(e)}")
+        return None
 
-# --- Optimized Functions ---
+def execute_query(query):
+    """Execute SQL query with connection handling"""
+    conn = None
+    try:
+        conn = get_connection()
+        if conn is None:
+            return None
+            
+        with conn.cursor() as cur:
+            cur.execute(query)
+            if cur.description:  # If query returns results
+                return cur.fetchall()
+            return True
+    except Exception as e:
+        st.error(f"❌ Query failed: {str(e)}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
 @st.cache_data(ttl=60)
 def load_data():
-    engine = get_engine()
+    """Load and process data from database"""
     query = """
         SELECT *, 
                COUNT(*) OVER (PARTITION BY src_ip, eventid) as attempt_count
@@ -84,80 +115,67 @@ def load_data():
         ORDER BY timestamp DESC 
         LIMIT 500
     """
-    df = pd.read_sql(query, engine)
+    rows = execute_query(query)
+    if rows is None:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(rows)
     
     # Apply attack detection
-    attack_info = df.apply(detect_attack_type, axis=1)
-    df['attack_type'] = attack_info.apply(lambda x: x[0])
-    df['attack_details'] = attack_info.apply(lambda x: x[1])
+    attack_info = []
+    for _, row in df.iterrows():
+        attack_info.append(detect_attack_type(row))
+    
+    df['attack_type'] = [x[0] for x in attack_info]
+    df['attack_details'] = [x[1] for x in attack_info]
     
     return df
-    conn = get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT *, 
-                       COUNT(*) OVER (PARTITION BY src_ip, eventid) as attempt_count
-                FROM hornet7_data 
-                ORDER BY timestamp DESC 
-                LIMIT 500
-            """)
-            rows = cur.fetchall()
-            df = pd.DataFrame(rows)
-            
-            # Apply attack detection
-            attack_info = []
-            for _, row in df.iterrows():
-                attack_info.append(detect_attack_type(row))
-            
-            df['attack_type'] = [x[0] for x in attack_info]
-            df['attack_details'] = [x[1] for x in attack_info]
-            
-            return df
-    finally:
-        conn.close()
 
+# --- Attack Detection ---
 def detect_attack_type(row):
+    """Classify attack type based on log entry"""
     eventid = row.get('eventid', '').lower()
     input_cmd = str(row.get('input', '')).lower()
     message = str(row.get('message', '')).lower()
-
+    
     if eventid == 'cowrie.login.failed':
         if int(row.get('attempt_count', 0)) >= BRUTE_FORCE_THRESHOLD:
             return "Brute Force Attack", f"Multiple failed logins ({row.get('attempt_count')} attempts)"
         return "Failed Login", "Single failed login attempt"
-
+    
     elif eventid == 'cowrie.login.success':
         return "Successful Login", "Login successful"
-
+    
     elif eventid == 'cowrie.command.input':
         for pattern in WIPER_PATTERNS:
             if re.search(pattern, input_cmd):
                 return "Destructive Attack (Wiper)", f"Wiper command: {input_cmd[:50]}..."
-
+        
         for pattern in MALWARE_PATTERNS:
             if re.search(pattern, input_cmd):
                 return "Malware Download Attempt", f"Download attempt: {input_cmd[:50]}..."
-
+        
         for pattern in RECON_PATTERNS:
             if re.search(pattern, input_cmd):
                 return "Reconnaissance / Enumeration", f"Recon command: {input_cmd[:50]}..."
-
+        
         return "Command Injection Attempt", input_cmd[:100]
-
+    
     elif eventid == 'cowrie.session.connect':
         return "Port Scanning / Connection Attempt", f"Connection to port {row.get('dst_port')}"
-
+    
     return "Unknown Activity", message[:100]
 
+# --- Visualization ---
 def build_session_graph(row):
+    """Create network graph for a session"""
     G = nx.DiGraph()
     src_ip = row.get('src_ip')
     eventid = row.get('eventid')
     dst_port = row.get('dst_port')
     attack_type = row.get('attack_type')
-
-    # Node colors based on attack type
+    
+    # Node styling
     color_map = {
         "Brute Force Attack": "#FF6B6B",
         "Destructive Attack (Wiper)": "#FF0000",
@@ -165,167 +183,169 @@ def build_session_graph(row):
         "Reconnaissance / Enumeration": "#ADD8E6",
         "Port Scanning / Connection Attempt": "#90EE90"
     }
-
+    
     if src_ip:
         G.add_node(src_ip, 
                   label=f"Source: {src_ip}",
                   color=color_map.get(attack_type, "lightblue"),
                   shape="box")
-
+    
     if eventid:
         G.add_node(eventid, 
                   label=f"Event: {eventid}",
                   color="#F0F0F0",
                   shape="ellipse")
-
+    
     if dst_port:
         port_node = f"Port {dst_port}"
         G.add_node(port_node, 
                   label=port_node,
                   color="#D8BFD8",
                   shape="diamond")
-
+    
     # Add edges
     if src_ip and eventid:
         G.add_edge(src_ip, eventid, 
                   title=f"Attack: {attack_type}",
                   color=color_map.get(attack_type, "grey"))
-
+    
     if eventid and dst_port:
         G.add_edge(eventid, port_node, 
                   title=f"Target port: {dst_port}",
                   color="#888888")
-
+    
     return G
 
 # --- Dashboard Layout ---
-st.set_page_config(
-    page_title="GraphPot - Network Session Analysis", 
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-st.title("🛡️ GraphPot - Network Session Analysis")
+def main():
+    st.set_page_config(
+        page_title="GraphPot - Network Session Analysis", 
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    st.title("🛡️ GraphPot - Network Session Analysis")
 
-if st.button("🔄 Refresh"):
-    st.rerun()
-
-st.markdown("---")
-
-# Load data with progress indicator
-with st.spinner('Loading threat data...'):
-    df = load_data()
-
-if not df.empty:
-    # --- Summary Metrics ---
-    st.subheader("📊 Attack Summary")
-    cols = st.columns(4)
-    metrics = [
-        ("🔒 Brute Force", "Brute Force Attack"),
-        ("🐍 Malware Download", "Malware Download Attempt"),
-        ("🔥 Wiper Attack", "Destructive Attack (Wiper)"),
-        ("🕵️ Reconnaissance", "Reconnaissance / Enumeration")
-    ]
-
-    for (icon, metric), col in zip(metrics, cols):
-        col.metric(icon, (df['attack_type'] == metric).sum())
+    if st.button("🔄 Refresh"):
+        st.rerun()
 
     st.markdown("---")
 
-    # --- Moving Marquee ---
-    top_ips = df['src_ip'].value_counts().head(3).index.tolist()
-    top_sessions = df['session'].value_counts().head(3).index.tolist()
-    top_events = df['eventid'].value_counts().head(3).index.tolist()
+    # Load data with progress indicator
+    with st.spinner('Loading threat data...'):
+        df = load_data()
 
-    moving_text = f"Top IPs: {', '.join(top_ips)} | Top Sessions: {', '.join(top_sessions)} | Top Events: {', '.join(top_events)}"
-    st.markdown(
-        f'<marquee style="font-size: 18px; color: black; background-color: white; padding: 10px;">{moving_text}</marquee>',
-        unsafe_allow_html=True
-    )
+    if not df.empty:
+        # --- Summary Metrics ---
+        st.subheader("📊 Attack Summary")
+        cols = st.columns(4)
+        metrics = [
+            ("🔒 Brute Force", "Brute Force Attack"),
+            ("🐍 Malware Download", "Malware Download Attempt"),
+            ("🔥 Wiper Attack", "Destructive Attack (Wiper)"),
+            ("🕵️ Reconnaissance", "Reconnaissance / Enumeration")
+        ]
+        
+        for (icon, metric), col in zip(metrics, cols):
+            col.metric(icon, (df['attack_type'] == metric).sum())
 
-    st.markdown("---")
+        st.markdown("---")
 
-    # --- Highlight Table ---
-    st.subheader("📋 Latest Captured Sessions")
+        # --- Moving Marquee ---
+        top_ips = df['src_ip'].value_counts().head(3).index.tolist()
+        top_sessions = df['session'].value_counts().head(3).index.tolist()
+        top_events = df['eventid'].value_counts().head(3).index.tolist()
 
-    def highlight_rows(row):
-        colors = {
-            "Destructive Attack (Wiper)": '#FFB6B6',
-            "Malware Download Attempt": '#FFF3CD',
-            "Brute Force Attack": '#D1ECF1',
-            "Reconnaissance / Enumeration": '#E2E3E5'
-        }
-        return ['background-color: ' + colors.get(row['attack_type'], '')] * len(row)
+        moving_text = f"Top IPs: {', '.join(top_ips)} | Top Sessions: {', '.join(top_sessions)} | Top Events: {', '.join(top_events)}"
+        st.markdown(
+            f'<marquee style="font-size: 18px; color: black; background-color: white; padding: 10px;">{moving_text}</marquee>',
+            unsafe_allow_html=True
+        )
 
-    attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique()))
-    filtered_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
+        st.markdown("---")
 
-    st.dataframe(
-        filtered_df[['timestamp', 'src_ip', 'eventid', 'attack_type', 'dst_port']]
-        .style.apply(highlight_rows, axis=1),
-        use_container_width=True,
-        height=400
-    )
+        # --- Highlight Table ---
+        st.subheader("📋 Latest Captured Sessions")
+        
+        def highlight_rows(row):
+            return ['background-color: ' + ATTACK_COLORS.get(row['attack_type'], '')] * len(row)
+        
+        attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique()))
+        filtered_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
+        
+        st.dataframe(
+            filtered_df[['timestamp', 'src_ip', 'eventid', 'attack_type', 'dst_port']]
+            .style.apply(highlight_rows, axis=1),
+            use_container_width=True,
+            height=400
+        )
 
-    st.markdown("---")
+        st.markdown("---")
 
-    # --- Network Session Mapping ---
-    st.subheader("🧠 Network Session Mapping")
+        # --- Network Session Mapping ---
+        st.subheader("🧠 Network Session Mapping")
+        
+        selected_session = st.selectbox(
+            "Select a Session ID to visualize:",
+            options=df['session'].unique()
+        )
 
-    selected_session = st.selectbox(
-        "Select a Session ID to visualize:",
-        options=df['session'].unique()
-    )
-
-    if selected_session:
-        selected_row = df[df['session'] == selected_session].iloc[0]
-
-        with st.spinner('Generating attack graph...'):
-            G = build_session_graph(selected_row)
-
-            # Configure stable visualization
-            net = Network(
-                height="700px", 
-                width="100%", 
-                directed=True, 
-                notebook=False,
-                cdn_resources="remote"
-            )
-
-            # Stabilize the graph
-            net.force_atlas_2based(
-                gravity=-50,
-                central_gravity=0.01,
-                spring_length=100,
-                spring_strength=0.08,
-                damping=0.4,
-                overlap=0.1
-            )
-
-            # Add nodes and edges
-            net.from_nx(G)
-
-            # Save and display
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
-                net.save_graph(tmp_file.name)
-                components.html(
-                    open(tmp_file.name, 'r', encoding='utf-8').read(), 
-                    height=700,
-                    width=None
+        if selected_session:
+            selected_row = df[df['session'] == selected_session].iloc[0]
+            attack_type = selected_row['attack_type']
+            bg_color = ATTACK_COLORS.get(attack_type, "#FFFFFF")
+            
+            with st.spinner('Generating attack graph...'):
+                G = build_session_graph(selected_row)
+                
+                # Configure stable visualization
+                net = Network(
+                    height="700px", 
+                    width="100%", 
+                    directed=True, 
+                    notebook=False,
+                    cdn_resources="remote"
                 )
-            os.unlink(tmp_file.name)
+                
+                # Stabilize the graph
+                net.force_atlas_2based(
+                    gravity=-50,
+                    central_gravity=0.01,
+                    spring_length=100,
+                    spring_strength=0.08,
+                    damping=0.4,
+                    overlap=0.1
+                )
+                
+                # Add nodes and edges
+                net.from_nx(G)
+                
+                # Save and display
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
+                    net.save_graph(tmp_file.name)
+                    components.html(
+                        open(tmp_file.name, 'r', encoding='utf-8').read(), 
+                        height=700,
+                        width=None
+                    )
+                os.unlink(tmp_file.name)
 
-        # Session details
-        st.markdown(f"""
-        **Session Details:**
-        - **Source IP:** `{selected_row.get('src_ip', 'N/A')}`
-        - **Attack Type:** `{selected_row['attack_type']}`
-        - **Target Port:** `{selected_row.get('dst_port', 'N/A')}`
-        - **Timestamp:** `{selected_row.get('timestamp', 'N/A')}`
-        - **Details:** `{selected_row.get('attack_details', 'N/A')}`
-        """)
+            # Session details with colored background
+            st.markdown(f"""
+            <div style="background-color:{bg_color}; padding:15px; border-radius:10px">
+            <h4>Session Details</h4>
+            <p><b>Source IP:</b> <code>{selected_row.get('src_ip', 'N/A')}</code></p>
+            <p><b>Attack Type:</b> <code>{attack_type}</code></p>
+            <p><b>Target Port:</b> <code>{selected_row.get('dst_port', 'N/A')}</code></p>
+            <p><b>Timestamp:</b> <code>{selected_row.get('timestamp', 'N/A')}</code></p>
+            <p><b>Details:</b> <code>{selected_row.get('attack_details', 'N/A')}</code></p>
+            </div>
+            """, unsafe_allow_html=True)
 
-else:
-    st.warning("⚠️ No data found.")
+    else:
+        st.warning("⚠️ No data found. Check database connection if this persists.")
 
-# Auto-refresh every 2 minutes
-st_autorefresh(interval=120000, key="data_refresh")
+    # Auto-refresh every 2 minutes
+    st_autorefresh(interval=120000, key="data_refresh")
+
+if __name__ == "__main__":
+    main()
