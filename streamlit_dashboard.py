@@ -14,6 +14,7 @@ import os
 import re
 import random
 from datetime import datetime
+import socket
 import time
 
 # --- Configuration ---
@@ -70,41 +71,56 @@ ATTACK_COLORS = {
 }
 
 # --- Database Functions ---
-@st.cache_resource(ttl=3600)  # Cache for 1 hour
+@st.cache_resource(ttl=3600)
 def get_connection():
-    """Create and cache database connection with improved error handling"""
+    """Create and cache database connection with comprehensive error handling"""
+    connection_params = {
+        "host": DB_HOST,
+        "dbname": DB_NAME,
+        "user": DB_USER,
+        "password": DB_PASS,
+        "port": DB_PORT,
+        "cursor_factory": RealDictCursor,
+        "sslmode": "require",
+        "connect_timeout": 5
+    }
+    
     try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASS,
-            port=DB_PORT,
-            cursor_factory=RealDictCursor,
-            sslmode='require',
-            connect_timeout=5  # 5 second connection timeout
-        )
+        # Attempt connection
+        conn = psycopg2.connect(**connection_params)
         
-        # Set connection to auto-reconnect
-        conn.autocommit = False
-        
-        # Test the connection immediately
+        # Verify connection works
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             if cur.fetchone()[0] != 1:
                 raise ValueError("Connection test failed")
-                
+        
+        st.success("✅ Database connection established successfully!")
         return conn
         
     except psycopg2.OperationalError as e:
-        st.error(f"❌ Database connection failed (Operational Error): {str(e)}")
-        return None
+        st.error(f"""
+        ❌ Database connection failed:
+        - Check your internet connection
+        - Verify database is running
+        - Confirm host/port are correct
+        Error details: {str(e)}
+        """)
     except psycopg2.Error as e:
-        st.error(f"❌ Database connection failed (PostgreSQL Error): {str(e)}")
-        return None
+        st.error(f"""
+        ❌ PostgreSQL error:
+        - Check your credentials
+        - Verify user permissions
+        Error details: {str(e)}
+        """)
     except Exception as e:
-        st.error(f"❌ Database connection failed (General Error): {str(e)}")
-        return None
+        st.error(f"""
+        ❌ Unexpected error:
+        - Please check all parameters
+        Error details: {str(e)}
+        """)
+    
+    return None
 
 def execute_query(query, params=None):
     """Execute SQL query with robust connection handling"""
@@ -149,6 +165,73 @@ def execute_query(query, params=None):
             # Don't close the connection - let Streamlit manage it
             pass
 
+def test_network():
+    """Test network connectivity to database host"""
+    try:
+        with st.spinner(f"Testing connection to {DB_HOST}:{DB_PORT}..."):
+            sock = socket.create_connection((DB_HOST, DB_PORT), timeout=5)
+            sock.close()
+            st.success("✅ Network connection to database host successful!")
+            return True
+    except Exception as e:
+        st.error(f"""
+        ❌ Network connection failed:
+        {str(e)}
+        
+        Possible issues:
+        1. Firewall blocking port 5432
+        2. DNS resolution failure
+        3. Host is unreachable
+        """)
+        return False
+
+def test_db_connection():
+    """Test database connectivity with detailed feedback"""
+    with st.spinner("Testing database connection..."):
+        try:
+            conn = psycopg2.connect(
+                host=DB_HOST,
+                dbname=DB_NAME,
+                user=DB_USER,
+                password=DB_PASS,
+                port=DB_PORT,
+                sslmode="require",
+                connect_timeout=5
+            )
+            
+            with conn.cursor() as cur:
+                cur.execute("SELECT version()")
+                version = cur.fetchone()
+                
+                cur.execute("SELECT current_database()")
+                db_name = cur.fetchone()
+                
+                cur.execute("SELECT current_user")
+                db_user = cur.fetchone()
+                
+            conn.close()
+            
+            st.success("✅ Connection successful!")
+            st.json({
+                "PostgreSQL Version": version[0],
+                "Database Name": db_name[0],
+                "Connected As": db_user[0]
+            })
+            return True
+            
+        except Exception as e:
+            st.error(f"""
+            ❌ Connection failed:
+            Error details: {str(e)}
+            
+            Troubleshooting steps:
+            1. Verify credentials in Supabase dashboard
+            2. Check network connectivity
+            3. Ensure SSL is enabled
+            4. Confirm database is running
+            """)
+            return False
+
 @st.cache_data(ttl=60)
 def load_data():
     """Load and process data from database"""
@@ -175,41 +258,6 @@ def load_data():
     
     return df
 
-def insert_row(data):
-    """Insert new log entry"""
-    query = """
-        INSERT INTO hornet7_data 
-        (timestamp, src_ip, eventid, input, message, session, dst_port)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """
-    params = (
-        data.get('timestamp'),
-        data.get('src_ip'),
-        data.get('eventid'),
-        data.get('input'),
-        data.get('message'),
-        data.get('session'),
-        data.get('dst_port')
-    )
-    return execute_query(query, params)
-
-def update_row(session_id, updates):
-    """Update existing log entry"""
-    set_clause = ", ".join([f"{k} = %s" for k in updates.keys()])
-    query = f"""
-        UPDATE hornet7_data 
-        SET {set_clause}
-        WHERE session = %s
-    """
-    params = list(updates.values()) + [session_id]
-    return execute_query(query, params)
-
-def delete_row(session_id):
-    """Delete log entry"""
-    query = "DELETE FROM hornet7_data WHERE session = %s"
-    return execute_query(query, (session_id,))
-
-# --- Attack Detection ---
 def detect_attack_type(row):
     """Classify attack type based on log entry"""
     eventid = row.get('eventid', '').lower()
@@ -244,7 +292,6 @@ def detect_attack_type(row):
     
     return "Unknown Activity", message[:100]
 
-# --- Visualization ---
 def build_session_graph(row):
     """Create network graph for a session"""
     G = nx.DiGraph()
@@ -294,7 +341,6 @@ def build_session_graph(row):
     
     return G
 
-# --- Main Dashboard ---
 def main():
     st.set_page_config(
         page_title="GraphPot - Network Session Analysis", 
@@ -325,7 +371,10 @@ def main():
         Please resolve these before continuing.
         """)
         return
-
+    
+    # Rest of your application code
+    st.success("✅ All systems operational - loading dashboard...")
+    
     if st.button("🔄 Refresh"):
         st.rerun()
 
@@ -373,7 +422,21 @@ def main():
                 "message": f"Port scan detected on {test_data['dst_port']}"
             })
         
-        if insert_row(test_data):
+        if execute_query("""
+            INSERT INTO hornet7_data 
+            (timestamp, src_ip, eventid, input, message, session, dst_port)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, 
+            (
+                test_data.get('timestamp'),
+                test_data.get('src_ip'),
+                test_data.get('eventid'),
+                test_data.get('input'),
+                test_data.get('message'),
+                test_data.get('session'),
+                test_data.get('dst_port')
+            )
+        ):
             st.sidebar.success(f"Inserted {attack_type} test data!")
             st.rerun()
         else:
@@ -434,7 +497,21 @@ def main():
                         "dst_port": st.text_input("Destination Port")
                     }
                     if st.form_submit_button("Insert"):
-                        if insert_row(new_data):
+                        if execute_query("""
+                            INSERT INTO hornet7_data 
+                            (timestamp, src_ip, eventid, input, message, session, dst_port)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """, 
+                            (
+                                new_data.get('timestamp'),
+                                new_data.get('src_ip'),
+                                new_data.get('eventid'),
+                                new_data.get('input'),
+                                new_data.get('message'),
+                                new_data.get('session'),
+                                new_data.get('dst_port')
+                            )
+                        ):
                             st.success("Entry inserted successfully!")
                             st.rerun()
                         else:
@@ -450,7 +527,13 @@ def main():
                         "false_positive"
                     ])
                     if st.form_submit_button("Update"):
-                        if update_row(session_id, {"status": new_status}):
+                        if execute_query("""
+                            UPDATE hornet7_data 
+                            SET status = %s
+                            WHERE session = %s
+                            """, 
+                            (new_status, session_id)
+                        ):
                             st.success("Entry updated successfully!")
                             st.rerun()
                         else:
@@ -460,7 +543,12 @@ def main():
                 with st.form("delete_form"):
                     del_id = st.text_input("Session ID to delete")
                     if st.form_submit_button("Delete"):
-                        if delete_row(del_id):
+                        if execute_query("""
+                            DELETE FROM hornet7_data 
+                            WHERE session = %s
+                            """, 
+                            (del_id,)
+                        ):
                             st.success("Entry deleted successfully!")
                             st.rerun()
                         else:
