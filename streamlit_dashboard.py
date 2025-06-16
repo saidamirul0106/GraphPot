@@ -2,74 +2,141 @@ import streamlit as st
 import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import socket
+import json
+import requests
+from confluent_kafka import Consumer, KafkaError
+from streamlit_autorefresh import st_autorefresh
+from pyvis.network import Network
+import streamlit.components.v1 as components
+import networkx as nx
+import tempfile
+import os
+import re
 import time
-from datetime import datetime
-import random
+import socket
 
 # --- Configuration ---
 DB_HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
 DB_NAME = "postgres"
-DB_USER = "postgres.ypsdflhceqxrjwyxvclr"  # Format: postgres.[project-ref]
-DB_PASS = "Serigala76!"  # MUST match exactly what's in Supabase
+DB_USER = "postgres.ypsdflhceqxrjwyxvclr"
+DB_PASS = "Serigala76!"
 DB_PORT = 5432
 
-# --- Enhanced Connection Testing ---
-def test_network_connection():
-    """Test if we can reach the database host"""
-    try:
-        with socket.create_connection((DB_HOST, DB_PORT), timeout=10) as sock:
-            return True
-    except Exception as e:
-        st.error(f"❌ Cannot reach {DB_HOST}:{DB_PORT} - {str(e)}")
-        return False
+KAFKA_BROKER = "10.0.2.15:9092"
+KAFKA_GROUP = "streamlit_consumer_group"
+KAFKA_TOPIC = "cowrie_logs"
 
-def test_database_credentials():
-    """Test if credentials are correct"""
+TELEGRAM_TOKEN = "8083560973:AAGoQstYrKVGVSIincqQ3r_MyGvurDVtNMo"
+TELEGRAM_CHAT_ID = "623056896"
+
+# --- Detection Patterns ---
+MALWARE_PATTERNS = [
+    r"wget\s+(https?|ftp)://",
+    r"curl\s+(https?|ftp)://",
+    r"\.(sh|bin|exe|py|js)\s*$"
+]
+
+WIPER_PATTERNS = [
+    r"rm\s+-rf",
+    r"dd\s+if=/dev/",
+    r":\(\)\{:\|:\&\};:",
+    r"mv\s+/dev/null",
+    r">\s+/dev/sd[a-z]"
+]
+
+RECON_PATTERNS = [
+    r"cat\s+/etc/passwd",
+    r"uname\s+-a",
+    r"whoami",
+    r"busybox",
+    r"nmap",
+    r"ping\s+-t",
+    r"ss\s+-tuln"
+]
+
+BRUTE_FORCE_THRESHOLD = 5
+
+# --- Attack Color Mapping ---
+ATTACK_COLORS = {
+    "Brute Force Attack": "#D1ECF1",
+    "Destructive Attack (Wiper)": "#FFB6B6",
+    "Malware Download Attempt": "#FFF3CD",
+    "Reconnaissance / Enumeration": "#E2E3E5",
+    "Port Scanning / Connection Attempt": "#D4EDDA",
+    "Command Injection Attempt": "#F8D7DA",
+    "Successful Login": "#D1E7DD",
+    "Failed Login": "#F8F9FA"
+}
+
+# --- Penetration Testing Commands ---
+PENTEST_COMMANDS = {
+    "Brute Force Attack": [
+        "hydra -L users.txt -P passwords.txt ssh://<TARGET_IP>",
+        "medusa -h <TARGET_IP> -U users.txt -P passwords.txt -M ssh"
+    ],
+    "Malware Download Attempt": [
+        "wget http://www.eicar.org/download/eicar.com -O /tmp/eicar_test",
+        "curl -o /tmp/eicar_test http://www.eicar.org/download/eicar.com.txt"
+    ],
+    "Destructive Attack (Wiper)": [
+        "rm -rf /important/directory/*",
+        "dd if=/dev/zero of=/dev/sda bs=1M"
+    ],
+    "Reconnaissance / Enumeration": [
+        "nmap -sV -T4 <TARGET_IP>",
+        "gobuster dir -u http://<TARGET_IP> -w /usr/share/wordlists/dirb/common.txt"
+    ],
+    "Port Scanning / Connection Attempt": [
+        "nc -zv <TARGET_IP> 1-1000",
+        "masscan -p1-1000 <TARGET_IP> --rate=1000"
+    ]
+}
+
+# --- Enhanced Database Functions ---
+def test_connection():
+    """Test database connection with detailed error reporting"""
     try:
+        # Test network connectivity first
+        with socket.create_connection((DB_HOST, DB_PORT), timeout=5):
+            pass
+    except Exception as e:
+        st.error(f"❌ Network connection failed to {DB_HOST}:{DB_PORT}")
+        st.error(f"Error details: {str(e)}")
+        return False
+    
+    try:
+        # Test database credentials
         conn = psycopg2.connect(
             host=DB_HOST,
             dbname=DB_NAME,
             user=DB_USER,
             password=DB_PASS,
             port=DB_PORT,
-            sslmode="require",
-            connect_timeout=10
+            sslmode='require',
+            connect_timeout=5
         )
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            if cur.fetchone()[0] != 1:
+                raise ValueError("Connection test failed")
         conn.close()
         return True
     except psycopg2.OperationalError as e:
-        st.error(f"❌ Connection failed: {str(e)}")
-        return False
+        st.error(f"❌ Database connection failed (OperationalError): {str(e)}")
     except psycopg2.ProgrammingError as e:
-        st.error(f"❌ Authentication failed: {str(e)}")
-        return False
-
-def test_table_exists():
-    """Check if the hornet7_data table exists"""
-    try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASS,
-            port=DB_PORT,
-            sslmode="require"
-        )
-        with conn.cursor() as cur:
-            cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'hornet7_data')")
-            exists = cur.fetchone()[0]
-        conn.close()
-        return exists
+        st.error(f"❌ Authentication failed (ProgrammingError): {str(e)}")
     except Exception as e:
-        st.error(f"❌ Error checking table: {str(e)}")
-        return False
+        st.error(f"❌ Unexpected connection error: {str(e)}")
+    
+    return False
 
-# --- Database Connection with Retry Logic ---
-@st.cache_resource(ttl=3600)
-def get_db_connection(max_retries=3, retry_delay=2):
-    """Create database connection with retry logic"""
-    for attempt in range(max_retries + 1):
+@st.cache_resource
+def get_connection():
+    """Create and cache database connection with retry logic"""
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
         try:
             conn = psycopg2.connect(
                 host=DB_HOST,
@@ -78,8 +145,8 @@ def get_db_connection(max_retries=3, retry_delay=2):
                 password=DB_PASS,
                 port=DB_PORT,
                 cursor_factory=RealDictCursor,
-                sslmode="require",
-                connect_timeout=10
+                sslmode='require',
+                connect_timeout=5
             )
             
             # Verify connection works
@@ -89,19 +156,18 @@ def get_db_connection(max_retries=3, retry_delay=2):
                     raise ValueError("Connection test failed")
             
             return conn
-            
         except Exception as e:
-            if attempt < max_retries:
+            if attempt < max_retries - 1:
                 time.sleep(retry_delay)
                 continue
-            st.error(f"❌ Database connection failed after {max_retries} attempts: {str(e)}")
+            st.error(f"❌ Failed to connect after {max_retries} attempts: {str(e)}")
             return None
 
 def execute_query(query, params=None):
-    """Execute SQL query with proper connection handling"""
+    """Execute SQL query with robust error handling"""
     conn = None
     try:
-        conn = get_db_connection()
+        conn = get_connection()
         if conn is None:
             return None
             
@@ -118,11 +184,10 @@ def execute_query(query, params=None):
         if conn:
             conn.close()
 
-# --- Data Loading ---
 @st.cache_data(ttl=60)
 def load_data():
-    """Load data from database with error handling"""
-    if not test_table_exists():
+    """Load and process data from database"""
+    if not test_connection():
         return pd.DataFrame()
     
     query = """
@@ -132,103 +197,255 @@ def load_data():
         ORDER BY timestamp DESC 
         LIMIT 500
     """
+    rows = execute_query(query)
+    if rows is None:
+        return pd.DataFrame()
     
-    result = execute_query(query)
-    return pd.DataFrame(result) if result else pd.DataFrame()
+    df = pd.DataFrame(rows)
+    
+    # Apply attack detection
+    attack_info = []
+    for _, row in df.iterrows():
+        attack_info.append(detect_attack_type(row))
+    
+    df['attack_type'] = [x[0] for x in attack_info]
+    df['attack_details'] = [x[1] for x in attack_info]
+    
+    return df
 
-# --- Main Application ---
+# --- Attack Detection ---
+def detect_attack_type(row):
+    """Classify attack type based on log entry"""
+    eventid = row.get('eventid', '').lower()
+    input_cmd = str(row.get('input', '')).lower()
+    message = str(row.get('message', '')).lower()
+    
+    if eventid == 'cowrie.login.failed':
+        if int(row.get('attempt_count', 0)) >= BRUTE_FORCE_THRESHOLD:
+            return "Brute Force Attack", f"Multiple failed logins ({row.get('attempt_count')} attempts)"
+        return "Failed Login", "Single failed login attempt"
+    
+    elif eventid == 'cowrie.login.success':
+        return "Successful Login", "Login successful"
+    
+    elif eventid == 'cowrie.command.input':
+        for pattern in WIPER_PATTERNS:
+            if re.search(pattern, input_cmd):
+                return "Destructive Attack (Wiper)", f"Wiper command: {input_cmd[:50]}..."
+        
+        for pattern in MALWARE_PATTERNS:
+            if re.search(pattern, input_cmd):
+                return "Malware Download Attempt", f"Download attempt: {input_cmd[:50]}..."
+        
+        for pattern in RECON_PATTERNS:
+            if re.search(pattern, input_cmd):
+                return "Reconnaissance / Enumeration", f"Recon command: {input_cmd[:50]}..."
+        
+        return "Command Injection Attempt", input_cmd[:100]
+    
+    elif eventid == 'cowrie.session.connect':
+        return "Port Scanning / Connection Attempt", f"Connection to port {row.get('dst_port')}"
+    
+    return "Unknown Activity", message[:100]
+
+# --- Visualization ---
+def build_session_graph(row):
+    """Create network graph for a session"""
+    G = nx.DiGraph()
+    src_ip = row.get('src_ip')
+    eventid = row.get('eventid')
+    dst_port = row.get('dst_port')
+    attack_type = row.get('attack_type')
+    
+    # Node styling
+    color_map = {
+        "Brute Force Attack": "#FF6B6B",
+        "Destructive Attack (Wiper)": "#FF0000",
+        "Malware Download Attempt": "#FFA500",
+        "Reconnaissance / Enumeration": "#ADD8E6",
+        "Port Scanning / Connection Attempt": "#90EE90"
+    }
+    
+    if src_ip:
+        G.add_node(src_ip, 
+                  label=f"Source: {src_ip}",
+                  color=color_map.get(attack_type, "lightblue"),
+                  shape="box")
+    
+    if eventid:
+        G.add_node(eventid, 
+                  label=f"Event: {eventid}",
+                  color="#F0F0F0",
+                  shape="ellipse")
+    
+    if dst_port:
+        port_node = f"Port {dst_port}"
+        G.add_node(port_node, 
+                  label=port_node,
+                  color="#D8BFD8",
+                  shape="diamond")
+    
+    # Add edges
+    if src_ip and eventid:
+        G.add_edge(src_ip, eventid, 
+                  title=f"Attack: {attack_type}",
+                  color=color_map.get(attack_type, "grey"))
+    
+    if eventid and dst_port:
+        G.add_edge(eventid, port_node, 
+                  title=f"Target port: {dst_port}",
+                  color="#888888")
+    
+    return G
+
+# --- Dashboard Layout ---
 def main():
     st.set_page_config(
         page_title="GraphPot - Network Session Analysis", 
         layout="wide",
         initial_sidebar_state="expanded"
     )
-    
     st.title("🛡️ GraphPot - Network Session Analysis")
-    
-    # --- Connection Verification ---
+
+    # Connection diagnostics
     with st.expander("🔍 Connection Diagnostics", expanded=True):
-        st.subheader("Connection Tests")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            if st.button("Test Network"):
-                if test_network_connection():
-                    st.success("✅ Network connection successful")
-        
-        with col2:
-            if st.button("Test Credentials"):
-                if test_database_credentials():
-                    st.success("✅ Database authentication successful")
-        
-        with col3:
-            if st.button("Check Table"):
-                if test_table_exists():
-                    st.success("✅ Table exists")
-                else:
-                    st.error("❌ Table not found")
-    
-    # Only proceed if all tests pass
-    if not (test_network_connection() and 
-            test_database_credentials() and 
-            test_table_exists()):
-        st.error("""
-        ❌ Critical connection issues detected. Please:
-        1. Verify your Supabase credentials
-        2. Check network connectivity
-        3. Ensure database is running
-        4. Confirm 'hornet7_data' table exists
-        """)
-        return
-    
-    # --- Data Loading ---
-    with st.spinner('Loading data...'):
+        if st.button("Test Database Connection"):
+            if test_connection():
+                st.success("✅ Database connection successful!")
+            else:
+                st.error("❌ Connection failed - check credentials and network")
+
+    if st.button("🔄 Refresh"):
+        st.rerun()
+
+    st.markdown("---")
+
+    # Load data with progress indicator
+    with st.spinner('Loading threat data...'):
         df = load_data()
-    
-    if df.empty:
-        st.warning("""
-        ⚠️ No data found. Possible reasons:
-        1. Table is empty
-        2. Connection issues
-        3. Query failed
+
+    if not df.empty:
+        # --- Summary Metrics ---
+        st.subheader("📊 Attack Summary")
+        cols = st.columns(4)
+        metrics = [
+            ("🔒 Brute Force", "Brute Force Attack"),
+            ("🐍 Malware Download", "Malware Download Attempt"),
+            ("🔥 Wiper Attack", "Destructive Attack (Wiper)"),
+            ("🕵️ Reconnaissance", "Reconnaissance / Enumeration")
+        ]
         
-        Try inserting test data first.
-        """)
+        for (icon, metric), col in zip(metrics, cols):
+            col.metric(icon, (df['attack_type'] == metric).sum())
+
+        st.markdown("---")
+
+        # --- Moving Marquee ---
+        top_ips = df['src_ip'].value_counts().head(3).index.tolist()
+        top_sessions = df['session'].value_counts().head(3).index.tolist()
+        top_events = df['eventid'].value_counts().head(3).index.tolist()
+
+        moving_text = f"Top IPs: {', '.join(top_ips)} | Top Sessions: {', '.join(top_sessions)} | Top Events: {', '.join(top_events)}"
+        st.markdown(
+            f'<marquee style="font-size: 18px; color: black; background-color: white; padding: 10px;">{moving_text}</marquee>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("---")
+
+        # --- Penetration Testing Guide ---
+        with st.expander("🔓 Penetration Testing Commands (Click to Expand)"):
+            st.write("Use these commands to simulate attacks for testing:")
+            
+            for attack_type, commands in PENTEST_COMMANDS.items():
+                st.markdown(f"**{attack_type}**")
+                for cmd in commands:
+                    st.code(cmd, language='bash')
+                st.markdown("---")
+
+        # --- Highlight Table ---
+        st.subheader("📋 Latest Captured Sessions")
         
-        # --- Test Data Insertion ---
-        with st.expander("Insert Test Data", expanded=True):
-            if st.button("Insert Sample Record"):
-                sample_data = {
-                    "timestamp": datetime.now().isoformat(),
-                    "src_ip": f"192.168.{random.randint(1,255)}.{random.randint(1,255)}",
-                    "eventid": "cowrie.session.connect",
-                    "message": "Test connection",
-                    "session": f"TEST-{random.randint(1000,9999)}",
-                    "dst_port": str(random.choice([22, 80, 443]))
-                }
+        def highlight_rows(row):
+            return ['background-color: ' + ATTACK_COLORS.get(row['attack_type'], '')] * len(row)
+        
+        attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique()))
+        filtered_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
+        
+        st.dataframe(
+            filtered_df[['timestamp', 'src_ip', 'eventid', 'attack_type', 'dst_port']]
+            .style.apply(highlight_rows, axis=1),
+            use_container_width=True,
+            height=400
+        )
+
+        st.markdown("---")
+
+        # --- Network Session Mapping ---
+        st.subheader("🧠 Network Session Mapping")
+        
+        selected_session = st.selectbox(
+            "Select a Session ID to visualize:",
+            options=df['session'].unique()
+        )
+
+        if selected_session:
+            selected_row = df[df['session'] == selected_session].iloc[0]
+            attack_type = selected_row['attack_type']
+            bg_color = ATTACK_COLORS.get(attack_type, "#FFFFFF")
+            
+            with st.spinner('Generating attack graph...'):
+                G = build_session_graph(selected_row)
                 
-                query = """
-                    INSERT INTO hornet7_data 
-                    (timestamp, src_ip, eventid, message, session, dst_port)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """
+                # Configure stable visualization
+                net = Network(
+                    height="700px", 
+                    width="100%", 
+                    directed=True, 
+                    notebook=False,
+                    cdn_resources="remote"
+                )
                 
-                if execute_query(query, list(sample_data.values())):
-                    st.success("✅ Test data inserted!")
-                    st.cache_data.clear()
-                    st.rerun()
-                else:
-                    st.error("Failed to insert test data")
-        return
-    
-    # --- Main Dashboard ---
-    st.success(f"✅ Loaded {len(df)} records")
-    
-    # Display data
-    st.dataframe(df.head())
-    
-    # Add your dashboard components here...
+                # Stabilize the graph
+                net.force_atlas_2based(
+                    gravity=-50,
+                    central_gravity=0.01,
+                    spring_length=100,
+                    spring_strength=0.08,
+                    damping=0.4,
+                    overlap=0.1
+                )
+                
+                # Add nodes and edges
+                net.from_nx(G)
+                
+                # Save and display
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
+                    net.save_graph(tmp_file.name)
+                    components.html(
+                        open(tmp_file.name, 'r', encoding='utf-8').read(), 
+                        height=700,
+                        width=None
+                    )
+                os.unlink(tmp_file.name)
+
+            # Session details with colored background
+            st.markdown(f"""
+            <div style="background-color:{bg_color}; padding:15px; border-radius:10px">
+            <h4>Session Details</h4>
+            <p><b>Source IP:</b> <code>{selected_row.get('src_ip', 'N/A')}</code></p>
+            <p><b>Attack Type:</b> <code>{attack_type}</code></p>
+            <p><b>Target Port:</b> <code>{selected_row.get('dst_port', 'N/A')}</code></p>
+            <p><b>Timestamp:</b> <code>{selected_row.get('timestamp', 'N/A')}</code></p>
+            <p><b>Details:</b> <code>{selected_row.get('attack_details', 'N/A')}</code></p>
+            </div>
+            """, unsafe_allow_html=True)
+
+    else:
+        st.warning("⚠️ No data found. Check database connection if this persists.")
+
+    # Auto-refresh every 2 minutes
+    st_autorefresh(interval=120000, key="data_refresh")
 
 if __name__ == "__main__":
     main()
