@@ -14,6 +14,7 @@ import os
 import re
 import random
 from datetime import datetime
+import time
 
 # --- Configuration ---
 DB_HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
@@ -69,9 +70,9 @@ ATTACK_COLORS = {
 }
 
 # --- Database Functions ---
-@st.cache_resource
+@st.cache_resource(ttl=3600)  # Cache for 1 hour
 def get_connection():
-    """Create and cache database connection"""
+    """Create and cache database connection with improved error handling"""
     try:
         conn = psycopg2.connect(
             host=DB_HOST,
@@ -80,33 +81,73 @@ def get_connection():
             password=DB_PASS,
             port=DB_PORT,
             cursor_factory=RealDictCursor,
-            sslmode='require'
+            sslmode='require',
+            connect_timeout=5  # 5 second connection timeout
         )
+        
+        # Set connection to auto-reconnect
+        conn.autocommit = False
+        
+        # Test the connection immediately
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            if cur.fetchone()[0] != 1:
+                raise ValueError("Connection test failed")
+                
         return conn
+        
+    except psycopg2.OperationalError as e:
+        st.error(f"❌ Database connection failed (Operational Error): {str(e)}")
+        return None
+    except psycopg2.Error as e:
+        st.error(f"❌ Database connection failed (PostgreSQL Error): {str(e)}")
+        return None
     except Exception as e:
-        st.error(f"❌ Database connection failed: {str(e)}")
+        st.error(f"❌ Database connection failed (General Error): {str(e)}")
         return None
 
 def execute_query(query, params=None):
-    """Execute SQL query with connection handling"""
+    """Execute SQL query with robust connection handling"""
     conn = None
-    try:
-        conn = get_connection()
-        if conn is None:
+    max_retries = 2
+    retry_delay = 1  # seconds
+    
+    for attempt in range(max_retries + 1):
+        try:
+            conn = get_connection()
+            if conn is None:
+                return None
+                
+            # Check if connection is still open
+            if conn.closed != 0:
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
+                    continue
+                raise psycopg2.InterfaceError("Connection is closed")
+                
+            with conn.cursor() as cur:
+                cur.execute(query, params or ())
+                if cur.description:  # If query returns results
+                    return cur.fetchall()
+                conn.commit()
+                return True
+                
+        except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
+            if attempt < max_retries:
+                st.warning(f"⚠️ Connection issue detected, retrying... (attempt {attempt + 1})")
+                time.sleep(retry_delay)
+                continue
+            st.error(f"❌ Query failed after retries: {str(e)}")
             return None
-            
-        with conn.cursor() as cur:
-            cur.execute(query, params or ())
-            if cur.description:  # If query returns results
-                return cur.fetchall()
-            conn.commit()
-            return True
-    except Exception as e:
-        st.error(f"❌ Query failed: {str(e)}")
-        return None
-    finally:
-        if conn:
-            conn.close()
+        except psycopg2.Error as e:
+            st.error(f"❌ PostgreSQL error: {str(e)}")
+            return None
+        except Exception as e:
+            st.error(f"❌ Unexpected error: {str(e)}")
+            return None
+        finally:
+            # Don't close the connection - let Streamlit manage it
+            pass
 
 @st.cache_data(ttl=60)
 def load_data():
