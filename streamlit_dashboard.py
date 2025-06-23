@@ -182,15 +182,7 @@ def update_row(row_id, data):
         st.error(f"Update failed: {str(e)}")
         return False
 
-def delete_row(session_id):
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM hornet7_data WHERE id = %s LIMIT 1", (id,))
-                if not cur.fetchone():
-                    st.error(f"Session {session_id} not found!")
-                    return False
-                def delete_row(row_id):
+def delete_row(row_id):
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
