@@ -1,9 +1,6 @@
 import streamlit as st
-
-# MUST be the first Streamlit command
 st.set_page_config(page_title="GraphPot - Network Session Analysis", layout="wide")
 
-# Now import other libraries after set_page_config()
 import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -17,7 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# Initialize auto-refresh (every 30 seconds)
+# Initialize auto-refresh
 st_autorefresh(interval=30000, key="data_refresh")
 
 # --- Configuration ---
@@ -52,8 +49,10 @@ def get_connection():
 # --- Telegram Alert ---
 def send_telegram_alert(data, source="Manual"):
     try:
+        attack_type = detect_attack_type(data.get('eventid'), data.get('input'), data.get('message'))
         alert_message = (
             f"🚨 <b>New {source} Alert</b>\n\n"
+            f"<b>Type:</b> {attack_type}\n"
             f"<b>Source IP:</b> {data.get('src_ip', 'N/A')}\n"
             f"<b>Event:</b> {data.get('eventid', 'N/A')}\n"
             f"<b>Message:</b> {data.get('message', 'N/A')}\n"
@@ -70,6 +69,32 @@ def send_telegram_alert(data, source="Manual"):
         )
     except Exception as e:
         st.error(f"Failed to send Telegram alert: {str(e)}")
+
+# --- Attack Detection ---
+def detect_attack_type(eventid, input_command, message):
+    if not eventid:
+        return "Unknown Activity"
+    
+    input_command = (input_command or "").lower()
+    message = (message or "").lower()
+
+    if eventid == "cowrie.login.failed":
+        return "Brute Force Attack"
+    elif eventid == "cowrie.login.success":
+        return "Successful Login"
+    elif eventid == "cowrie.command.input":
+        if any(k in input_command for k in ["wget", "curl", ".sh", ".bin"]):
+            return "Malware Download Attempt"
+        elif any(k in input_command for k in ["rm -rf", "dd if=", ":(){ :|:& };:"]):
+            return "Destructive Attack (Wiper)"
+        elif any(k in input_command for k in ["cat /etc/passwd", "uname -a", "whoami"]):
+            return "Reconnaissance / Enumeration"
+        else:
+            return "Command Injection Attempt"
+    elif eventid == "cowrie.session.connect":
+        return "Port Scanning / Connection Attempt"
+    else:
+        return "Unknown Activity"
 
 # --- Data Functions ---
 def load_data():
@@ -94,6 +119,14 @@ def load_data():
 
 def insert_row(data):
     try:
+        # Auto-detect attack type before insertion
+        data['attack_type'] = detect_attack_type(
+            data.get('eventid'),
+            data.get('input'),
+            data.get('message')
+        )
+        
+        # Clean empty strings
         data = {k: (None if v == '' else v) for k, v in data.items()}
         data.pop('id', None)
         data.pop('created_at', None)
@@ -141,7 +174,8 @@ def update_row(row_id, data):
                     {
                         "src_ip": data.get("src_ip", "N/A"),
                         "eventid": "update",
-                        "message": f"Updated row {row_id}"
+                        "message": f"Updated row {row_id}",
+                        "attack_type": data.get("attack_type", "Unknown")
                     },
                     "Update"
                 )
@@ -174,29 +208,7 @@ def delete_row(session_id):
         st.error(f"Delete failed: {str(e)}")
         return False
 
-# --- Helper Functions ---
-def detect_attack_type(eventid, input_command, message):
-    input_command = (input_command or "").lower()
-    message = (message or "").lower()
-
-    if eventid == "cowrie.login.failed":
-        return "Brute Force Attack"
-    elif eventid == "cowrie.login.success":
-        return "Successful Login"
-    elif eventid == "cowrie.command.input":
-        if any(k in input_command for k in ["wget", "curl", ".sh", ".bin"]):
-            return "Malware Download Attempt"
-        elif any(k in input_command for k in ["rm -rf", "dd if=", ":(){ :|:& };:"]):
-            return "Destructive Attack (Wiper)"
-        elif any(k in input_command for k in ["cat /etc/passwd", "uname -a", "whoami"]):
-            return "Reconnaissance / Enumeration"
-        else:
-            return "Command Injection Attempt"
-    elif eventid == "cowrie.session.connect":
-        return "Port Scanning / Connection Attempt"
-    else:
-        return "Unknown Activity"
-
+# --- Visualization Helpers ---
 def build_session_graph(row):
     G = nx.DiGraph()
     src_ip = row.get('src_ip')
@@ -221,7 +233,20 @@ def build_session_graph(row):
 def generate_description(row):
     return f"Session {row.get('session', 'N/A')} from {row.get('src_ip', 'Unknown IP')} attempted {row.get('eventid', 'unknown event')} on port {row.get('dst_port', 'unknown port')}."
 
-# --- Main App ---
+def get_attack_color(attack_type):
+    color_map = {
+        'Destructive Attack (Wiper)': '#FFEBEE',  # Light red
+        'Malware Download Attempt': '#FFF8E1',    # Light orange
+        'Brute Force Attack': '#E8F5E9',         # Light green
+        'Reconnaissance / Enumeration': '#E3F2FD', # Light blue
+        'Command Injection Attempt': '#F3E5F5',   # Light purple
+        'Port Scanning / Connection Attempt': '#E0E0E0', # Light gray
+        'Successful Login': '#E8F5E9',            # Light green
+        'Unknown Activity': '#FAFAFA'             # White
+    }
+    return color_map.get(attack_type, '#FFFFFF')
+
+# --- Streamlit UI ---
 def main():
     st.title("🛡️ GraphPot - Network Session Analysis")
 
@@ -243,17 +268,34 @@ def main():
 
         st.markdown("---")
 
+        # --- Moving Marquee ---
+        top_ips = df['src_ip'].value_counts().head(3).index.tolist()
+        top_sessions = df['session'].value_counts().head(3).index.tolist()
+        top_events = df['eventid'].value_counts().head(3).index.tolist()
+        
+        moving_text = f"Top IPs: {', '.join(top_ips)} | Top Sessions: {', '.join(top_sessions)} | Top Events: {', '.join(top_events)}"
+        st.markdown(
+            f'<marquee style="color: white; background-color: #1E1E1E; padding: 10px; border-radius: 5px;">{moving_text}</marquee>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("---")
+
         # --- Data Table ---
         st.subheader("📋 Latest Captured Sessions")
         
         def highlight_rows(row):
-            color_map = {
+            colors = {
                 'Destructive Attack (Wiper)': '#FFB6B6',
                 'Malware Download Attempt': '#FFF3CD',
                 'Brute Force Attack': '#D1ECF1',
-                'Reconnaissance / Enumeration': '#E2E3E5'
+                'Reconnaissance / Enumeration': '#E2E3E5',
+                'Command Injection Attempt': '#E1BEE7',
+                'Port Scanning / Connection Attempt': '#BDBDBD',
+                'Successful Login': '#C8E6C9',
+                'Unknown Activity': '#FFFFFF'
             }
-            return ['background-color: ' + color_map.get(row['attack_type'], '')] * len(row)
+            return ['background-color: ' + colors.get(row['attack_type'], '#FFFFFF')] * len(row)
         
         attack_filter = st.selectbox(
             "🔍 Filter by Attack Type:", 
@@ -327,10 +369,34 @@ def main():
                 row.get('input'), 
                 row.get('message')
             )
-            st.markdown(f"""
-                **Session Overview:** {generate_description(row)}  
-                **Attack Type:** `{attack_type}`
-            """)
+            
+            # Colored description box
+            st.markdown(
+                f"""
+                <div style="
+                    background-color: {get_attack_color(attack_type)};
+                    padding: 15px;
+                    border-radius: 5px;
+                    margin: 10px 0;
+                    border-left: 5px solid {{
+                        'Destructive Attack (Wiper)': '#F44336',
+                        'Malware Download Attempt': '#FF9800',
+                        'Brute Force Attack': '#4CAF50',
+                        'Reconnaissance / Enumeration': '#2196F3',
+                        'Command Injection Attempt': '#9C27B0',
+                        'Port Scanning / Connection Attempt': '#607D8B',
+                        'Successful Login': '#4CAF50',
+                        'Unknown Activity': '#9E9E9E'
+                    }.get(attack_type, '#9E9E9E')};
+                ">
+                    <h4>Session Overview</h4>
+                    <p>{generate_description(row)}</p>
+                    <h4>Attack Type</h4>
+                    <p><strong>{attack_type}</strong></p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
     else:
         st.warning("⚠️ No data found")
