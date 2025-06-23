@@ -1,4 +1,9 @@
 import streamlit as st
+
+# MUST be the first Streamlit command
+st.set_page_config(page_title="GraphPot - Network Session Analysis", layout="wide")
+
+# Now import other libraries after set_page_config()
 import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -89,14 +94,12 @@ def load_data():
 
 def insert_row(data):
     try:
-        # Clean empty strings
         data = {k: (None if v == '' else v) for k, v in data.items()}
         data.pop('id', None)
         data.pop('created_at', None)
         
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Parameterized query for safety
                 columns = ', '.join(data.keys())
                 placeholders = ', '.join(['%s'] * len(data))
                 cur.execute(
@@ -115,7 +118,6 @@ def update_row(row_id, data):
         data.pop('id', None)
         data = {k: v for k, v in data.items() if v not in [None, ""]}
         
-        # Auto-detect attack type if relevant fields changed
         if any(k in data for k in ['eventid', 'input', 'message']):
             data['attack_type'] = detect_attack_type(
                 data.get('eventid', ''),
@@ -124,7 +126,7 @@ def update_row(row_id, data):
             )
         
         if not data:
-            return True  # No updates needed
+            return True
 
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -152,13 +154,11 @@ def delete_row(session_id):
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Verify existence first
                 cur.execute("SELECT 1 FROM hornet7_data WHERE session = %s LIMIT 1", (session_id,))
                 if not cur.fetchone():
                     st.error(f"Session {session_id} not found!")
                     return False
                 
-                # Perform deletion
                 cur.execute("DELETE FROM hornet7_data WHERE session = %s", (session_id,))
                 conn.commit()
                 send_telegram_alert(
@@ -221,9 +221,8 @@ def build_session_graph(row):
 def generate_description(row):
     return f"Session {row.get('session', 'N/A')} from {row.get('src_ip', 'Unknown IP')} attempted {row.get('eventid', 'unknown event')} on port {row.get('dst_port', 'unknown port')}."
 
-# --- Streamlit UI ---
+# --- Main App ---
 def main():
-    st.set_page_config(page_title="GraphPot - Network Session Analysis", layout="wide")
     st.title("🛡️ GraphPot - Network Session Analysis")
 
     if st.button("🔄 Refresh"):
@@ -247,7 +246,6 @@ def main():
         # --- Data Table ---
         st.subheader("📋 Latest Captured Sessions")
         
-        # Highlight rows by attack type
         def highlight_rows(row):
             color_map = {
                 'Destructive Attack (Wiper)': '#FFB6B6',
@@ -257,7 +255,10 @@ def main():
             }
             return ['background-color: ' + color_map.get(row['attack_type'], '')] * len(row)
         
-        attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique()))
+        attack_filter = st.selectbox(
+            "🔍 Filter by Attack Type:", 
+            ["All"] + sorted(df['attack_type'].unique())
+        )
         
         display_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
         st.dataframe(
@@ -310,20 +311,17 @@ def main():
             row = df[df['session'] == selected_session].iloc[0]
             G = build_session_graph(row)
             
-            # Generate interactive graph
             net = Network(height="600px", width="100%", directed=True)
             for node, attrs in G.nodes(data=True):
                 net.add_node(node, **attrs)
             for src, dst, attrs in G.edges(data=True):
                 net.add_edge(src, dst, **attrs)
             
-            # Save and display
             with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
                 net.save_graph(tmp.name)
                 components.html(open(tmp.name).read(), height=650)
                 os.unlink(tmp.name)
             
-            # Display attack info
             attack_type = detect_attack_type(
                 row.get('eventid'), 
                 row.get('input'), 
