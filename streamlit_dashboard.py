@@ -283,7 +283,7 @@ if not df.empty:
             return [''] * len(row)
 
     st.subheader("📋 Latest Captured Sessions")
-    attack_filter = st.selectbox("🔍 Filter by Attack Type:", options=["All"] + sorted(df['attack_type'].unique())
+    attack_filter = st.selectbox("🔍 Filter by Attack Type:", options=["All"] + sorted(df['attack_type'].unique()))
 
     if attack_filter != "All":
         df = df[df['attack_type'] == attack_filter]
