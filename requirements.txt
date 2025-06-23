@@ -1,8 +1,7 @@
 streamlit
-psycopg2-binary
 pandas
+psycopg2-binary
 pyvis
 networkx
 requests
-confluent_kafka
-streamlit-autorefresh
+python-dotenv
