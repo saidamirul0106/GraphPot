@@ -257,9 +257,7 @@ def main():
             }
             return ['background-color: ' + color_map.get(row['attack_type'], '')] * len(row)
         
-        attack_filter = st.selectbox(
-            "🔍 Filter by Attack Type:", 
-            ["All"] + sorted(df['attack_type'].unique())
+        attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique()))
         
         display_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
         st.dataframe(
