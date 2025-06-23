@@ -190,14 +190,26 @@ def delete_row(session_id):
                 if not cur.fetchone():
                     st.error(f"Session {session_id} not found!")
                     return False
+                def delete_row(row_id):
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # First check if the row exists
+                cur.execute("SELECT 1 FROM hornet7_data WHERE id = %s LIMIT 1", (row_id,))
+                if not cur.fetchone():
+                    st.error(f"Row with ID {row_id} not found!")
+                    return False
                 
-                cur.execute("DELETE FROM hornet7_data WHERE  = %s", (id,))
+                # Delete the row
+                cur.execute("DELETE FROM hornet7_data WHERE id = %s", (row_id,))
                 conn.commit()
+                
+                # Send alert
                 send_telegram_alert(
                     {
                         "src_ip": "N/A", 
                         "eventid": "delete", 
-                        "message": f"Deleted session {session_id}"
+                        "message": f"Deleted row with ID {row_id}"
                     },
                     "Delete"
                 )
@@ -331,9 +343,9 @@ def main():
                         st.experimental_rerun()
 
         with st.expander("❌ Delete by Session ID"):
-            session_id = st.text_input("Session ID to delete:")
+            row_id = st.text_input("ID to delete:")
             if st.button("Delete"):
-                if delete_row(session_id):
+                if delete_row(row_id):
                     st.experimental_rerun()
 
         st.markdown("---")
