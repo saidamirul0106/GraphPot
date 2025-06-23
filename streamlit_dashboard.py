@@ -186,12 +186,12 @@ def delete_row(session_id):
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM hornet7_data WHERE session = %s LIMIT 1", (session_id,))
+                cur.execute("SELECT 1 FROM hornet7_data WHERE id = %s LIMIT 1", (id,))
                 if not cur.fetchone():
                     st.error(f"Session {session_id} not found!")
                     return False
                 
-                cur.execute("DELETE FROM hornet7_data WHERE session = %s", (session_id,))
+                cur.execute("DELETE FROM hornet7_data WHERE  = %s", (id,))
                 conn.commit()
                 send_telegram_alert(
                     {
