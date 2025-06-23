@@ -5,7 +5,7 @@ from psycopg2.extras import RealDictCursor
 import json
 import requests
 from confluent_kafka import Consumer, KafkaError
-from streamlit-autorefresh import st_autorefresh
+from streamlit_autorefresh import st_autorefresh
 from pyvis.network import Network
 import streamlit.components.v1 as components
 import networkx as nx
