@@ -14,117 +14,126 @@ import os
 import time
 from contextlib import contextmanager
 from datetime import datetime
-import sys
-import subprocess
-import pkg_resources
-
-# --- Package Installation (For Render) ---
-def install_packages():
-    required = {'psycopg2-binary', 'streamlit', 'pandas', 'pyvis', 'networkx', 'requests', 'python-dotenv'}
-    installed = {pkg.key for pkg in pkg_resources.working_set}
-    missing = required - installed
-    if missing:
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', *missing])
-
-if __name__ == '__main__':
-    install_packages()
+import threading
 
 # --- Configuration ---
-DB_HOST = os.getenv("DB_HOST", "aws-0-ap-southeast-1.pooler.supabase.com")
-DB_NAME = os.getenv("DB_NAME", "postgres")
-DB_USER = os.getenv("DB_USER", "postgres.ypsdflhceqxrjwyxvclr")
-DB_PASS = os.getenv("DB_PASS", "Serigala76!")
-DB_PORT = os.getenv("DB_PORT", "5432")
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "10.0.2.15:9092")
-KAFKA_GROUP = os.getenv("KAFKA_GROUP", "streamlit_consumer_group")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "cowrie_logs")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8083560973:AAGoQstYrKVGVSIincqQ3r_MyGvurDVtNMo")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "623056896")
+DB_HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
+DB_NAME = "postgres"
+DB_USER = "postgres.ypsdflhceqxrjwyxvclr"
+DB_PASS = "Serigala76!"
+DB_PORT = "5432"
+KAFKA_BROKER = "10.0.2.15:9092"
+KAFKA_GROUP = "streamlit_consumer_group"
+KAFKA_TOPIC = "cowrie_logs"
+TELEGRAM_TOKEN = "8083560973:AAGoQstYrKVGVSIincqQ3r_MyGvurDVtNMo"
+TELEGRAM_CHAT_ID = "623056896"
 
-# --- Fixed Connection Handling ---
+# --- Connection Handling ---
 @contextmanager
 def get_connection():
-    conn = None
+    conn = psycopg2.connect(
+        host=DB_HOST,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASS,
+        port=DB_PORT,
+        cursor_factory=RealDictCursor,
+        sslmode='require',
+        keepalives=1,
+        keepalives_idle=30,
+        connect_timeout=5
+    )
     try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASS,
-            port=DB_PORT,
-            cursor_factory=RealDictCursor,
-            sslmode='require',
-            keepalives=1,
-            keepalives_idle=30,
-            connect_timeout=5,
-            application_name="graphpot_dash"
-        )
         yield conn
-    except Exception as e:
-        st.error(f"Connection failed: {str(e)}")
-        st.stop()
     finally:
-        if conn is not None:
-            conn.close()
+        conn.close()
+
+# --- Kafka Consumer ---
+def consume_kafka():
+    conf = {
+        'bootstrap.servers': KAFKA_BROKER,
+        'group.id': KAFKA_GROUP,
+        'auto.offset.reset': 'latest'
+    }
+    consumer = Consumer(conf)
+    consumer.subscribe([KAFKA_TOPIC])
+
+    try:
+        while True:
+            msg = consumer.poll(1.0)
+            if msg is None:
+                continue
+            if msg.error():
+                if msg.error().code() == KafkaError._PARTITION_EOF:
+                    continue
+                else:
+                    st.error(f"Kafka error: {msg.error()}")
+                    break
+
+            try:
+                log = json.loads(msg.value().decode('utf-8'))
+                with get_connection() as conn:
+                    with conn.cursor() as cur:
+                        columns = ', '.join(log.keys())
+                        values = ', '.join(['%s'] * len(log))
+                        sql = f"INSERT INTO hornet7_data ({columns}) VALUES ({values})"
+                        cur.execute(sql, list(log.values()))
+                        conn.commit()
+                        send_telegram_alert(log, "Kafka")
+            except Exception as e:
+                st.error(f"Failed to process Kafka message: {str(e)}")
+    finally:
+        consumer.close()
 
 # --- Telegram Alert ---
-def send_telegram_alert(data, source="Manual"):
+def send_telegram_alert(data, source):
     try:
         alert_message = (
-            f"🚨 <b>New {source} Data Inserted</b>\n\n"
+            f"🚨 <b>New {source} Alert</b>\n\n"
             f"<b>Source IP:</b> {data.get('src_ip', 'N/A')}\n"
             f"<b>Event:</b> {data.get('eventid', 'N/A')}\n"
             f"<b>Message:</b> {data.get('message', 'N/A')}\n"
-            f"<b>Time:</b> {data.get('timestamp', 'N/A')}"
+            f"<b>Time:</b> {data.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}"
         )
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": alert_message,
-            "parse_mode": "HTML"
-        }
-        requests.post(url, data=payload, timeout=5)
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": alert_message,
+                "parse_mode": "HTML"
+            },
+            timeout=5
+        )
     except Exception as e:
-        st.error(f"Failed to send Telegram alert: {e}")
+        st.error(f"Failed to send Telegram alert: {str(e)}")
 
 # --- Data Functions ---
 def load_data():
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT * FROM hornet7_data ORDER BY timestamp DESC LIMIT 100;")  # Reduced limit for Render
-                rows = cur.fetchall()
-                df = pd.DataFrame(rows)
-                if not df.empty:
-                    df['attack_type'] = df.apply(lambda row: detect_attack_type(
-                        row.get('eventid', ''), 
-                        row.get('input', ''), 
-                        row.get('message', '')
-                    ), axis=1)
-                return df
+                cur.execute("SELECT * FROM hornet7_data ORDER BY timestamp DESC LIMIT 1000")
+                return pd.DataFrame(cur.fetchall())
     except Exception as e:
         st.error(f"Failed to load data: {str(e)}")
         return pd.DataFrame()
 
 def insert_row(data):
     try:
-        for key, value in data.items():
-            if value == '':
-                data[key] = None
-
+        data = {k: (None if v == '' else v) for k, v in data.items()}
         data.pop('id', None)
         data.pop('created_at', None)
-
-        columns = ', '.join(data.keys())
-        values_placeholder = ', '.join(['%s'] * len(data))
         
         with get_connection() as conn:
             with conn.cursor() as cur:
-                sql = f"INSERT INTO hornet7_data ({columns}) VALUES ({values_placeholder})"
-                cur.execute(sql, list(data.values()))
+                columns = ', '.join(data.keys())
+                values = ', '.join(['%s'] * len(data))
+                cur.execute(
+                    f"INSERT INTO hornet7_data ({columns}) VALUES ({values})",
+                    list(data.values())
+                )
                 conn.commit()
-                st.success("Data inserted successfully!")
-                send_telegram_alert(data, source="Manual")
+                send_telegram_alert(data, "Manual")
                 return True
     except Exception as e:
         st.error(f"Insert failed: {str(e)}")
@@ -132,36 +141,32 @@ def insert_row(data):
 
 def update_row(row_id, data):
     try:
-        if 'id' in data:
-            data.pop('id')
-
+        data.pop('id', None)
         data = {k: v for k, v in data.items() if v not in [None, ""]}
-
+        
         if any(k in data for k in ['eventid', 'input', 'message']):
-            eventid = data.get('eventid', '')
-            input_cmd = data.get('input', '')
-            message = data.get('message', '')
-            data['attack_type'] = detect_attack_type(eventid, input_cmd, message)
-
+            data['attack_type'] = detect_attack_type(
+                data.get('eventid', ''),
+                data.get('input', ''),
+                data.get('message', '')
+            )
+        
         if not data:
             return True
 
-        set_clause = ', '.join([f"{col} = %s" for col in data.keys()])
-        values = list(data.values())
-        values.append(row_id)
-
         with get_connection() as conn:
             with conn.cursor() as cur:
-                sql = f"UPDATE hornet7_data SET {set_clause} WHERE id = %s"
-                cur.execute(sql, values)
+                set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
+                values = list(data.values()) + [row_id]
+                cur.execute(
+                    f"UPDATE hornet7_data SET {set_clause} WHERE id = %s",
+                    values
+                )
                 conn.commit()
-                st.success("Update successful!")
-                send_telegram_alert({
-                    "src_ip": data.get("src_ip", "N/A"),
-                    "eventid": data.get("eventid", "N/A"),
-                    "message": f"Session ID {row_id} has been updated.",
-                    "timestamp": datetime.now().isoformat()
-                }, source="Update")
+                send_telegram_alert(
+                    {"src_ip": data.get("src_ip"), "eventid": "update", "message": f"Updated row {row_id}"},
+                    "Update"
+                )
                 return True
     except Exception as e:
         st.error(f"Update failed: {str(e)}")
@@ -171,39 +176,19 @@ def delete_row(session_id):
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id FROM hornet7_data WHERE session = %s LIMIT 1", (session_id,))
-                if not cur.fetchone():
-                    st.error(f"Session {session_id} not found!")
-                    return False
-
-        send_telegram_alert({
-            "src_ip": "N/A",
-            "eventid": "Session Deleted",
-            "message": f"Session {session_id} marked for deletion",
-            "timestamp": datetime.now().isoformat()
-        }, source="Delete")
-
-        with get_connection() as conn:
-            with conn.cursor() as cur:
                 cur.execute("DELETE FROM hornet7_data WHERE session = %s", (session_id,))
                 conn.commit()
-                st.success(f"Session {session_id} deleted successfully")
+                send_telegram_alert(
+                    {"src_ip": "N/A", "eventid": "delete", "message": f"Deleted session {session_id}"},
+                    "Delete"
+                )
                 return True
     except Exception as e:
         st.error(f"Delete failed: {str(e)}")
-        send_telegram_alert({
-            "src_ip": "N/A",
-            "eventid": "Delete Failed",
-            "message": f"Failed to delete session {session_id}: {str(e)}",
-            "timestamp": datetime.now().isoformat()
-        }, source="Error")
         return False
 
 # --- Helper Functions ---
 def detect_attack_type(eventid, input_command, message):
-    if not eventid:
-        return "Unknown Activity"
-    
     input_command = (input_command or "").lower()
     message = (message or "").lower()
 
@@ -212,11 +197,11 @@ def detect_attack_type(eventid, input_command, message):
     elif eventid == "cowrie.login.success":
         return "Successful Login"
     elif eventid == "cowrie.command.input":
-        if any(keyword in input_command for keyword in ["wget", "curl", ".sh", ".bin"]):
+        if any(k in input_command for k in ["wget", "curl", ".sh", ".bin"]):
             return "Malware Download Attempt"
-        elif any(keyword in input_command for keyword in ["rm -rf", "dd if=", ":(){ :|:& };:"]):
+        elif any(k in input_command for k in ["rm -rf", "dd if=", ":(){ :|:& };:"]):
             return "Destructive Attack (Wiper)"
-        elif any(keyword in input_command for keyword in ["cat /etc/passwd", "uname -a", "whoami", "busybox"]):
+        elif any(k in input_command for k in ["cat /etc/passwd", "uname -a", "whoami"]):
             return "Reconnaissance / Enumeration"
         else:
             return "Command Injection Attempt"
@@ -242,7 +227,7 @@ def build_session_graph(row):
     if src_ip and eventid:
         G.add_edge(src_ip, eventid, title=f"{src_ip} triggered {eventid}")
     if eventid and dst_port:
-        G.add_edge(eventid, f"Port {dst_port}", title=f"{eventid} targeted port {dst_port}")
+        G.add_edge(eventid, port_node, title=f"{eventid} targeted port {dst_port}")
 
     return G
 
@@ -254,125 +239,102 @@ def main():
     st.set_page_config(page_title="GraphPot - Network Session Analysis", layout="wide")
     st.title("🛡️ GraphPot - Network Session Analysis")
 
+    # Start Kafka consumer in background
+    if not hasattr(st.session_state, 'kafka_thread'):
+        st.session_state.kafka_thread = threading.Thread(target=consume_kafka, daemon=True)
+        st.session_state.kafka_thread.start()
+
     if st.button("🔄 Refresh"):
         st.experimental_rerun()
 
     st.markdown("---")
 
     df = load_data()
-
     if not df.empty:
-        st.subheader("📊 Attack Summary")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("🔒 Brute Force", (df['attack_type'] == "Brute Force Attack").sum())
-        col2.metric("🐍 Malware Download", (df['attack_type'] == "Malware Download Attempt").sum())
-        col3.metric("🔥 Wiper Attack", (df['attack_type'] == "Destructive Attack (Wiper)").sum())
-        col4.metric("🕵️ Reconnaissance", (df['attack_type'] == "Reconnaissance / Enumeration").sum())
-
-        st.markdown("---")
-
-        def highlight_rows(row):
-            if row['attack_type'] == 'Destructive Attack (Wiper)':
-                return ['background-color: #FFB6B6'] * len(row)
-            elif row['attack_type'] == 'Malware Download Attempt':
-                return ['background-color: #FFF3CD'] * len(row)
-            elif row['attack_type'] == 'Brute Force Attack':
-                return ['background-color: #D1ECF1'] * len(row)
-            elif row['attack_type'] == 'Reconnaissance / Enumeration':
-                return ['background-color: #E2E3E5'] * len(row)
-            else:
-                return [''] * len(row)
-
-        st.subheader("📋 Latest Captured Sessions")
-        attack_filter = st.selectbox("🔍 Filter by Attack Type:", options=["All"] + sorted(df['attack_type'].unique()))
-
-        if attack_filter != "All":
-            df = df[df['attack_type'] == attack_filter]
-
-        st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True)
-
-        st.markdown("---")
-
-        top_ips = df['src_ip'].value_counts().head(3).index.tolist()
-        top_sessions = df['session'].value_counts().head(3).index.tolist()
-        top_events = df['eventid'].value_counts().head(3).index.tolist()
-
-        moving_text = f"Top IPs: {', '.join(top_ips)} | Top Sessions: {', '.join(top_sessions)} | Top Events: {', '.join(top_events)}"
-        st.markdown(
-            f'<marquee style="font-size: 18px; color: black; background-color: white; padding: 10px;">{moving_text}</marquee>',
-            unsafe_allow_html=True
+        df['attack_type'] = df.apply(
+            lambda r: detect_attack_type(r.get('eventid'), r.get('input'), r.get('message')),
+            axis=1
         )
 
+        # Summary Metrics
+        st.subheader("📊 Attack Summary")
+        cols = st.columns(4)
+        cols[0].metric("🔒 Brute Force", (df['attack_type'] == "Brute Force Attack").sum())
+        cols[1].metric("🐍 Malware Download", (df['attack_type'] == "Malware Download Attempt").sum())
+        cols[2].metric("🔥 Wiper Attack", (df['attack_type'] == "Destructive Attack (Wiper)").sum())
+        cols[3].metric("🕵️ Reconnaissance", (df['attack_type'] == "Reconnaissance / Enumeration").sum())
+
         st.markdown("---")
 
+        # Highlight Table
+        def highlight_rows(row):
+            colors = {
+                'Destructive Attack (Wiper)': '#FFB6B6',
+                'Malware Download Attempt': '#FFF3CD',
+                'Brute Force Attack': '#D1ECF1',
+                'Reconnaissance / Enumeration': '#E2E3E5'
+            }
+            return ['background-color: ' + colors.get(row['attack_type'], '')] * len(row)
+
+        st.subheader("📋 Latest Captured Sessions")
+        attack_filter = st.selectbox("🔍 Filter by Attack Type:", ["All"] + sorted(df['attack_type'].unique()))
+        filtered_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
+        st.dataframe(filtered_df.style.apply(highlight_rows, axis=1), use_container_width=True)
+
+        st.markdown("---")
+
+        # Insert New Row
         with st.expander("➕ Insert New Row"):
-            new_data = {}
-            for col in df.columns:
-                if col not in ["attack_type", "id", "created_at"]:
-                    new_data[col] = st.text_input(f"{col}", key=f"insert_{col}")
+            new_data = {col: st.text_input(col) for col in df.columns if col not in ['attack_type', 'id', 'created_at']}
             if st.button("Insert"):
                 if insert_row(new_data):
                     st.experimental_rerun()
 
+        # Update Row
         with st.expander("✏️ Update Sessions"):
-            row_id_to_update = st.text_input("Row ID to update")
-            if row_id_to_update:
-                updated_data = {}
-                for col in df.columns:
-                    if col not in ["attack_type", "id", "created_at"]:
-                        updated_data[col] = st.text_input(f"{col} (new value)", key=f"update_{col}")
+            row_id = st.text_input("Row ID to update")
+            if row_id:
+                updated_data = {col: st.text_input(f"New {col}", key=f"update_{col}") 
+                              for col in df.columns if col not in ['attack_type', 'id', 'created_at']}
                 if st.button("Update"):
-                    if update_row(row_id_to_update, updated_data):
+                    if update_row(row_id, updated_data):
                         st.experimental_rerun()
 
+        # Delete Row
         with st.expander("❌ Delete by Session ID"):
-            sid_del = st.text_input("Session ID to delete:")
+            session_id = st.text_input("Session ID to delete")
             if st.button("Delete"):
-                if delete_row(sid_del):
+                if delete_row(session_id):
                     st.experimental_rerun()
 
         st.markdown("---")
 
+        # Network Visualization
         st.subheader("🧠 Network Session Mapping")
-        selected_session = st.selectbox(
-            "Select a Session ID to visualize:",
-            options=df['session'].unique()
-        )
-
+        selected_session = st.selectbox("Select Session:", df['session'].unique())
         if selected_session:
-            selected_row = df[df['session'] == selected_session].iloc[0]
-            G = build_session_graph(selected_row)
-            description = generate_description(selected_row)
-
-            net = Network(height="600px", width="100%", directed=True, notebook=False)
-            net.barnes_hut()
-
-            for node, data in G.nodes(data=True):
-                net.add_node(node, label=data.get("label", node), color=data.get("color", "grey"))
-
-            for src, dst, edge_data in G.edges(data=True):
-                title = edge_data.get("title", f"{src} -> {dst}")
-                net.add_edge(src, dst, title=title, arrows="to")
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
-                net.save_graph(tmp_file.name)
-                components.html(open(tmp_file.name, 'r', encoding='utf-8').read(), height=650)
-            os.unlink(tmp_file.name)
-
-            attack = detect_attack_type(selected_row.get('eventid', ''), selected_row.get('input', ''), selected_row.get('message', ''))
-            session_info = f"📄 **Session Overview:** {description}\n\n🛡️ Detected Attack Type: `{attack}`"
-
-            if attack == "Destructive Attack (Wiper)":
-                st.error(session_info)
-            elif attack == "Malware Download Attempt":
-                st.warning(session_info)
-            elif attack in ["Brute Force Attack", "Reconnaissance / Enumeration"]:
-                st.info(session_info)
-            else:
-                st.success(session_info)
+            row = df[df['session'] == selected_session].iloc[0]
+            G = build_session_graph(row)
+            
+            net = Network(height="600px", width="100%", directed=True)
+            for node, attrs in G.nodes(data=True):
+                net.add_node(node, **attrs)
+            for src, dst, attrs in G.edges(data=True):
+                net.add_edge(src, dst, **attrs)
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
+                net.save_graph(tmp.name)
+                components.html(open(tmp.name).read(), height=650)
+                os.unlink(tmp.name)
+            
+            attack_type = detect_attack_type(row.get('eventid'), row.get('input'), row.get('message'))
+            st.markdown(f"""
+                **Session Overview:** {generate_description(row)}  
+                **Attack Type:** `{attack_type}`
+            """)
 
     else:
-        st.warning("⚠️ No data found.")
+        st.warning("⚠️ No data found")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
