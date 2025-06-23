@@ -89,8 +89,6 @@ def detect_attack_type(eventid, input_command, message):
             return "Destructive Attack (Wiper)"
         elif any(k in input_command for k in ["cat /etc/passwd", "uname -a", "whoami"]):
             return "Reconnaissance / Enumeration"
-        else:
-            return "Command Injection Attempt"
     elif eventid == "cowrie.session.connect":
         return "Port Scanning / Connection Attempt"
     else:
@@ -239,7 +237,6 @@ def get_attack_color(attack_type):
         'Malware Download Attempt': '#FFF8E1',    # Light orange
         'Brute Force Attack': '#E8F5E9',         # Light green
         'Reconnaissance / Enumeration': '#E3F2FD', # Light blue
-        'Command Injection Attempt': '#F3E5F5',   # Light purple
         'Port Scanning / Connection Attempt': '#E0E0E0', # Light gray
         'Successful Login': '#E8F5E9',            # Light green
         'Unknown Activity': '#FAFAFA'             # White
@@ -275,7 +272,7 @@ def main():
         
         moving_text = f"Top IPs: {', '.join(top_ips)} | Top Sessions: {', '.join(top_sessions)} | Top Events: {', '.join(top_events)}"
         st.markdown(
-            f'<marquee style="color: white; background-color: #1E1E1E; padding: 10px; border-radius: 5px;">{moving_text}</marquee>',
+            f'<marquee style="color: white; background-color: #FFFFFF; padding: 10px; border-radius: 5px;">{moving_text}</marquee>',
             unsafe_allow_html=True
         )
 
@@ -290,7 +287,6 @@ def main():
                 'Malware Download Attempt': '#FFF3CD',
                 'Brute Force Attack': '#D1ECF1',
                 'Reconnaissance / Enumeration': '#E2E3E5',
-                'Command Injection Attempt': '#E1BEE7',
                 'Port Scanning / Connection Attempt': '#BDBDBD',
                 'Successful Login': '#C8E6C9',
                 'Unknown Activity': '#FFFFFF'
@@ -375,7 +371,6 @@ def main():
                 'Malware Download Attempt': '#FF9800',
                 'Brute Force Attack': '#4CAF50',
                 'Reconnaissance / Enumeration': '#2196F3',
-                'Command Injection Attempt': '#9C27B0',
                 'Port Scanning / Connection Attempt': '#607D8B',
                 'Successful Login': '#4CAF50',
                 'Unknown Activity': '#9E9E9E'
