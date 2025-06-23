@@ -292,10 +292,10 @@ def main():
                 'Unknown Activity': '#FFFFFF'
             }
             return ['background-color: ' + colors.get(row['attack_type'], '#FFFFFF')] * len(row)
-        
+
         attack_filter = st.selectbox(
             "🔍 Filter by Attack Type:", 
-            ["All"] + sorted(df['attack_type'].unique())
+            ["All"] + sorted(df['attack_type'].fillna("Unknown Activity").unique())
         )
         
         display_df = df if attack_filter == "All" else df[df['attack_type'] == attack_filter]
