@@ -370,33 +370,34 @@ def main():
                 row.get('message')
             )
             
-            # Colored description box
-            st.markdown(
-                f"""
-                <div style="
-                    background-color: {get_attack_color(attack_type)};
-                    padding: 15px;
-                    border-radius: 5px;
-                    margin: 10px 0;
-                    border-left: 5px solid {{
-                        'Destructive Attack (Wiper)': '#F44336',
-                        'Malware Download Attempt': '#FF9800',
-                        'Brute Force Attack': '#4CAF50',
-                        'Reconnaissance / Enumeration': '#2196F3',
-                        'Command Injection Attempt': '#9C27B0',
-                        'Port Scanning / Connection Attempt': '#607D8B',
-                        'Successful Login': '#4CAF50',
-                        'Unknown Activity': '#9E9E9E'
-                    }.get(attack_type, '#9E9E9E')};
-                ">
-                    <h4>Session Overview</h4>
-                    <p>{generate_description(row)}</p>
-                    <h4>Attack Type</h4>
-                    <p><strong>{attack_type}</strong></p>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            border_colors = {
+                'Destructive Attack (Wiper)': '#F44336',
+                'Malware Download Attempt': '#FF9800',
+                'Brute Force Attack': '#4CAF50',
+                'Reconnaissance / Enumeration': '#2196F3',
+                'Command Injection Attempt': '#9C27B0',
+                'Port Scanning / Connection Attempt': '#607D8B',
+                'Successful Login': '#4CAF50',
+                'Unknown Activity': '#9E9E9E'
+            }
+
+st.markdown(
+    f"""
+    <div style="
+        background-color: {get_attack_color(attack_type)};
+        padding: 15px;
+        border-radius: 5px;
+        margin: 10px 0;
+        border-left: 5px solid {border_colors.get(attack_type, '#9E9E9E')};
+    ">
+        <h4>Session Overview</h4>
+        <p>{generate_description(row)}</p>
+        <h4>Attack Type</h4>
+        <p><strong>{attack_type}</strong></p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
     else:
         st.warning("⚠️ No data found")
