@@ -276,7 +276,7 @@ def main():
         
         moving_text = f"Top IPs: {', '.join(top_ips)} | Top Sessions: {', '.join(top_sessions)} | Top Events: {', '.join(top_events)}"
         st.markdown(
-            f'<marquee style="color: white; background-color: #FFFFFF; padding: 10px; border-radius: 5px;">{moving_text}</marquee>',
+            f'<marquee style="color: black; background-color: #FFFFFF; padding: 10px; border-radius: 5px;">{moving_text}</marquee>',
             unsafe_allow_html=True
         )
 
